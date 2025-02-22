@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -36,6 +36,8 @@ public class Policies {
     public final AuthPolicies auth_policies = AuthPolicies.builder().build();
     @SuppressWarnings("checkstyle:MemberName")
     public Set<String> replication_clusters = new HashSet<>();
+    @SuppressWarnings("checkstyle:MemberName")
+    public Set<String> allowed_clusters = new HashSet<>();
     public BundlesData bundles;
     @SuppressWarnings("checkstyle:MemberName")
     public Map<BacklogQuota.BacklogQuotaType, BacklogQuota> backlog_quota_map = new HashMap<>();
@@ -60,7 +62,7 @@ public class Policies {
     @SuppressWarnings("checkstyle:MemberName")
     public Integer message_ttl_in_seconds = null;
     @SuppressWarnings("checkstyle:MemberName")
-    public int subscription_expiration_time_minutes = 0;
+    public Integer subscription_expiration_time_minutes = null;
     @SuppressWarnings("checkstyle:MemberName")
     public RetentionPolicies retention_policies = null;
     public boolean deleted = false;
@@ -94,20 +96,21 @@ public class Policies {
     @SuppressWarnings("checkstyle:MemberName")
     public long offload_threshold = -1;
     @SuppressWarnings("checkstyle:MemberName")
+    public long offload_threshold_in_seconds = -1;
+    @SuppressWarnings("checkstyle:MemberName")
     public Long offload_deletion_lag_ms = null;
     @SuppressWarnings("checkstyle:MemberName")
     public Integer max_topics_per_namespace = null;
 
     @SuppressWarnings("checkstyle:MemberName")
     @Deprecated
-    public SchemaAutoUpdateCompatibilityStrategy schema_auto_update_compatibility_strategy =
-        SchemaAutoUpdateCompatibilityStrategy.Full;
+    public SchemaAutoUpdateCompatibilityStrategy schema_auto_update_compatibility_strategy = null;
 
     @SuppressWarnings("checkstyle:MemberName")
     public SchemaCompatibilityStrategy schema_compatibility_strategy = SchemaCompatibilityStrategy.UNDEFINED;
 
     @SuppressWarnings("checkstyle:MemberName")
-    public boolean is_allow_auto_update_schema = true;
+    public Boolean is_allow_auto_update_schema = null;
 
     @SuppressWarnings("checkstyle:MemberName")
     public boolean schema_validation_enforced = false;
@@ -125,9 +128,20 @@ public class Policies {
     @SuppressWarnings("checkstyle:MemberName")
     public String resource_group_name = null;
 
+    public boolean migrated;
+
+    public Boolean dispatcherPauseOnAckStatePersistentEnabled;
+
+    public enum BundleType {
+        LARGEST, HOT;
+    }
+
+    @SuppressWarnings("checkstyle:MemberName")
+    public EntryFilters entryFilters = null;
+
     @Override
     public int hashCode() {
-        return Objects.hash(auth_policies, replication_clusters,
+        return Objects.hash(auth_policies, replication_clusters, allowed_clusters,
                 backlog_quota_map, publishMaxMessageRate, clusterDispatchRate,
                 topicDispatchRate, subscriptionDispatchRate, replicatorDispatchRate,
                 clusterSubscribeRate, deduplicationEnabled, autoTopicCreationOverride,
@@ -139,7 +153,7 @@ public class Policies {
                 max_producers_per_topic,
                 max_consumers_per_topic, max_consumers_per_subscription,
                 max_unacked_messages_per_consumer, max_unacked_messages_per_subscription,
-                compaction_threshold, offload_threshold,
+                compaction_threshold, offload_threshold, offload_threshold_in_seconds,
                 offload_deletion_lag_ms,
                 schema_auto_update_compatibility_strategy,
                 schema_validation_enforced,
@@ -148,7 +162,8 @@ public class Policies {
                 offload_policies,
                 subscription_types_enabled,
                 properties,
-                resource_group_name);
+                resource_group_name, entryFilters, migrated,
+                dispatcherPauseOnAckStatePersistentEnabled);
     }
 
     @Override
@@ -157,6 +172,7 @@ public class Policies {
             Policies other = (Policies) obj;
             return Objects.equals(auth_policies, other.auth_policies)
                     && Objects.equals(replication_clusters, other.replication_clusters)
+                    && Objects.equals(allowed_clusters, other.allowed_clusters)
                     && Objects.equals(backlog_quota_map, other.backlog_quota_map)
                     && Objects.equals(clusterDispatchRate, other.clusterDispatchRate)
                     && Objects.equals(topicDispatchRate, other.topicDispatchRate)
@@ -185,6 +201,7 @@ public class Policies {
                     && Objects.equals(max_consumers_per_subscription, other.max_consumers_per_subscription)
                     && Objects.equals(compaction_threshold, other.compaction_threshold)
                     && offload_threshold == other.offload_threshold
+                    && offload_threshold_in_seconds == other.offload_threshold_in_seconds
                     && Objects.equals(offload_deletion_lag_ms, other.offload_deletion_lag_ms)
                     && schema_auto_update_compatibility_strategy == other.schema_auto_update_compatibility_strategy
                     && schema_validation_enforced == other.schema_validation_enforced
@@ -193,7 +210,11 @@ public class Policies {
                     && Objects.equals(offload_policies, other.offload_policies)
                     && Objects.equals(subscription_types_enabled, other.subscription_types_enabled)
                     && Objects.equals(properties, other.properties)
-                    && Objects.equals(resource_group_name, other.resource_group_name);
+                    && Objects.equals(migrated, other.migrated)
+                    && Objects.equals(resource_group_name, other.resource_group_name)
+                    && Objects.equals(entryFilters, other.entryFilters)
+                    && Objects.equals(dispatcherPauseOnAckStatePersistentEnabled,
+                    other.dispatcherPauseOnAckStatePersistentEnabled);
         }
 
         return false;

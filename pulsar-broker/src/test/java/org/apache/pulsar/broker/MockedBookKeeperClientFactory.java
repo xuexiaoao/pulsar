@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,23 +18,17 @@
  */
 package org.apache.pulsar.broker;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import io.netty.channel.EventLoopGroup;
-
-import java.io.IOException;
-import java.util.concurrent.Executors;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ExecutorService;
-
+import java.util.concurrent.CompletableFuture;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.EnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.PulsarMockBookKeeper;
-
 import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.stats.StatsLogger;
-import org.apache.zookeeper.ZooKeeper;
+import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,17 +51,19 @@ public class MockedBookKeeperClientFactory implements BookKeeperClientFactory {
     }
 
     @Override
-    public BookKeeper create(ServiceConfiguration conf, ZooKeeper zkClient, EventLoopGroup eventLoopGroup,
-            Optional<Class<? extends EnsemblePlacementPolicy>> ensemblePlacementPolicyClass,
-            Map<String, Object> properties) throws IOException {
-        return mockedBk;
+    public CompletableFuture<BookKeeper> create(ServiceConfiguration conf, MetadataStoreExtended store,
+                                                EventLoopGroup eventLoopGroup,
+                                                Optional<Class<? extends EnsemblePlacementPolicy>> ensemblePlacementPolicyClass,
+                                                Map<String, Object> properties) {
+        return CompletableFuture.completedFuture(mockedBk);
     }
 
     @Override
-    public BookKeeper create(ServiceConfiguration conf, ZooKeeper zkClient, EventLoopGroup eventLoopGroup,
+    public CompletableFuture<BookKeeper> create(ServiceConfiguration conf, MetadataStoreExtended store,
+                             EventLoopGroup eventLoopGroup,
                              Optional<Class<? extends EnsemblePlacementPolicy>> ensemblePlacementPolicyClass,
-                             Map<String, Object> properties, StatsLogger statsLogger) throws IOException {
-        return mockedBk;
+                             Map<String, Object> properties, StatsLogger statsLogger) {
+        return CompletableFuture.completedFuture(mockedBk);
     }
 
     @Override

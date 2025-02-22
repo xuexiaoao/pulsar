@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -20,7 +20,6 @@ package org.apache.pulsar.policies.data.loadbalancer;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
-import com.google.common.collect.Maps;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -51,11 +50,13 @@ public class LoadReport implements LoadManagerReport {
     private long timestamp;
     private double msgRateIn;
     private double msgRateOut;
-    private int numTopics;
+    private long numTopics;
     private int numConsumers;
     private int numProducers;
     private int numBundles;
     private Map<String, String> protocols;
+    private String loadManagerClassName;
+    private long startTimestamp;
     // This place-holder requires to identify correct LoadManagerReport type while deserializing
     @SuppressWarnings("checkstyle:ConstantName")
     public static final String loadReportType = LoadReport.class.getSimpleName();
@@ -204,7 +205,7 @@ public class LoadReport implements LoadManagerReport {
     }
 
     @Override
-    public int getNumTopics() {
+    public long getNumTopics() {
         numTopics = 0;
         if (this.bundleStats != null) {
             this.bundleStats.forEach((bundle, stats) -> {
@@ -261,7 +262,7 @@ public class LoadReport implements LoadManagerReport {
         }
 
         NamespaceBundleStatsComparator nsc = new NamespaceBundleStatsComparator(bundleStats, resType);
-        TreeMap<String, NamespaceBundleStats> sortedBundleStats = Maps.newTreeMap(nsc);
+        TreeMap<String, NamespaceBundleStats> sortedBundleStats = new TreeMap<>(nsc);
         sortedBundleStats.putAll(bundleStats);
         return sortedBundleStats;
     }
@@ -474,5 +475,23 @@ public class LoadReport implements LoadManagerReport {
     @Override
     public Optional<String> getProtocol(String protocol) {
         return Optional.ofNullable(protocols.get(protocol));
+    }
+
+    @Override
+    public String getLoadManagerClassName() {
+        return this.loadManagerClassName;
+    }
+
+    public void setLoadManagerClassName(String loadManagerClassName) {
+        this.loadManagerClassName = loadManagerClassName;
+    }
+
+    @Override
+    public long getStartTimestamp() {
+        return this.startTimestamp;
+    }
+
+    public void setStartTimestamp(long startTimestamp) {
+        this.startTimestamp = startTimestamp;
     }
 }

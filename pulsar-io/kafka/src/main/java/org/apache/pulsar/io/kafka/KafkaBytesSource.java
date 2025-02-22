@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -16,16 +16,17 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.pulsar.io.kafka;
-
-import java.nio.ByteBuffer;
-import java.util.*;
 
 import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
 import io.confluent.kafka.serializers.KafkaAvroDeserializer;
 import io.confluent.kafka.serializers.KafkaAvroDeserializerConfig;
+import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.Properties;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -41,10 +42,8 @@ import org.apache.kafka.common.serialization.LongDeserializer;
 import org.apache.kafka.common.serialization.ShortDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.pulsar.client.api.Schema;
-import org.apache.pulsar.client.impl.schema.AutoProduceBytesSchema;
 import org.apache.pulsar.client.impl.schema.SchemaInfoImpl;
 import org.apache.pulsar.common.schema.KeyValue;
-import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.schema.SchemaType;
 import org.apache.pulsar.io.core.annotations.Connector;
 import org.apache.pulsar.io.core.annotations.IOType;
@@ -71,8 +70,8 @@ import org.apache.pulsar.io.core.annotations.IOType;
 public class KafkaBytesSource extends KafkaAbstractSource<ByteBuffer> {
 
     private AvroSchemaCache schemaCache;
-    private Schema keySchema;
-    private Schema valueSchema;
+    private Schema<ByteBuffer> keySchema;
+    private Schema<ByteBuffer> valueSchema;
     private boolean produceKeyValue;
 
     @Override
@@ -81,8 +80,10 @@ public class KafkaBytesSource extends KafkaAbstractSource<ByteBuffer> {
         props.putIfAbsent(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         log.info("Created kafka consumer config : {}", props);
 
-        keySchema = getSchemaFromDeserializerAndAdaptConfiguration(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, props, true);
-        valueSchema = getSchemaFromDeserializerAndAdaptConfiguration(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, props, false);
+        keySchema = getSchemaFromDeserializerAndAdaptConfiguration(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
+                props, true);
+        valueSchema = getSchemaFromDeserializerAndAdaptConfiguration(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
+                props, false);
 
         boolean needsSchemaCache = keySchema == DeferredSchemaPlaceholder.INSTANCE
                                     || valueSchema == DeferredSchemaPlaceholder.INSTANCE;
@@ -92,11 +93,11 @@ public class KafkaBytesSource extends KafkaAbstractSource<ByteBuffer> {
         }
 
         if (keySchema.getSchemaInfo().getType() != SchemaType.STRING) {
-            // if the Key is a String we can use native Pulsar Key
-            // otherwise we use KeyValue schema
-            // that allows you to set a schema for the Key and a schema for the Value.
-            // using SEPARATED encoding the key is saved into the binary key
-            // so it is used for routing and for compaction
+            // If the Key is a String we can use native Pulsar Key.
+            // Otherwise, we use KeyValue schema.
+            // That allows you to set a schema for the Key and a schema for the Value.
+            // Using SEPARATED encoding the key is saved into the binary key,
+            // so it is used for routing and for compaction.
             produceKeyValue = true;
         }
 
@@ -113,22 +114,24 @@ public class KafkaBytesSource extends KafkaAbstractSource<ByteBuffer> {
     }
 
     @Override
-    public KafkaRecord buildRecord(ConsumerRecord<Object, Object> consumerRecord) {
+    public KafkaRecord<ByteBuffer> buildRecord(ConsumerRecord<Object, Object> consumerRecord) {
         if (produceKeyValue) {
-            Object key = extractSimpleValue(consumerRecord.key());
-            Object value = extractSimpleValue(consumerRecord.value());
-            Schema currentKeySchema = getSchemaFromObject(consumerRecord.key(), keySchema);
-            Schema currentValueSchema = getSchemaFromObject(consumerRecord.value(), valueSchema);
-            return new KeyValueKafkaRecord(consumerRecord,
+            ByteBuffer key = extractSimpleValue(consumerRecord.key());
+            ByteBuffer value = extractSimpleValue(consumerRecord.value());
+            Schema<ByteBuffer> currentKeySchema = getSchemaFromObject(consumerRecord.key(), keySchema);
+            Schema<ByteBuffer> currentValueSchema = getSchemaFromObject(consumerRecord.value(), valueSchema);
+            return new KeyValueKafkaRecord<ByteBuffer, ByteBuffer>(consumerRecord,
                     new KeyValue<>(key, value),
                     currentKeySchema,
-                    currentValueSchema);
+                    currentValueSchema,
+                    copyKafkaHeaders(consumerRecord));
 
         } else {
             Object value = consumerRecord.value();
-            return new KafkaRecord(consumerRecord,
+            return new KafkaRecord<>(consumerRecord,
                     extractSimpleValue(value),
-                    getSchemaFromObject(value, valueSchema));
+                    getSchemaFromObject(value, valueSchema),
+                    copyKafkaHeaders(consumerRecord));
 
         }
     }
@@ -145,11 +148,11 @@ public class KafkaBytesSource extends KafkaAbstractSource<ByteBuffer> {
         } else if (value instanceof ByteBuffer) {
             return (ByteBuffer) value;
         } else {
-            throw new IllegalArgumentException("Unexpected type from Kafka: "+value.getClass());
+            throw new IllegalArgumentException("Unexpected type from Kafka: " + value.getClass());
         }
     }
 
-    private Schema<ByteBuffer> getSchemaFromObject(Object value, Schema fallback) {
+    private Schema<ByteBuffer> getSchemaFromObject(Object value, Schema<ByteBuffer> fallback) {
         if (value instanceof BytesWithKafkaSchema) {
             // this is a Struct with schema downloaded by the schema registry
             // the schema may be different from record to record
@@ -159,7 +162,8 @@ public class KafkaBytesSource extends KafkaAbstractSource<ByteBuffer> {
         }
     }
 
-    private static Schema<ByteBuffer> getSchemaFromDeserializerAndAdaptConfiguration(String key, Properties props, boolean isKey) {
+    private static Schema<ByteBuffer> getSchemaFromDeserializerAndAdaptConfiguration(String key, Properties props,
+                                                                                     boolean isKey) {
         String kafkaDeserializerClass = props.getProperty(key);
         Objects.requireNonNull(kafkaDeserializerClass);
 
@@ -175,7 +179,7 @@ public class KafkaBytesSource extends KafkaAbstractSource<ByteBuffer> {
             result = Schema.BYTEBUFFER;
         } else if (StringDeserializer.class.getName().equals(kafkaDeserializerClass)) {
             if (isKey) {
-                // for the key we use the String value and we want StringDeserializer
+                // for the key we use the String value, and we want StringDeserializer
                 props.put(key, kafkaDeserializerClass);
             }
             result = Schema.STRING;
@@ -197,16 +201,16 @@ public class KafkaBytesSource extends KafkaAbstractSource<ByteBuffer> {
             // but we the schema is created by downloading the definition from the SchemaRegistry
             return DeferredSchemaPlaceholder.INSTANCE;
         } else {
-            throw new IllegalArgumentException("Unsupported deserializer "+kafkaDeserializerClass);
+            throw new IllegalArgumentException("Unsupported deserializer " + kafkaDeserializerClass);
         }
         return new ByteBufferSchemaWrapper(result);
     }
 
-    Schema getKeySchema() {
+    Schema<ByteBuffer> getKeySchema() {
         return keySchema;
     }
 
-    Schema getValueSchema() {
+    Schema<ByteBuffer> getValueSchema() {
         return valueSchema;
     }
 

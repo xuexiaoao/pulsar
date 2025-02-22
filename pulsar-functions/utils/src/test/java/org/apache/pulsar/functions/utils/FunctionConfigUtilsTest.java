@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,36 +18,69 @@
  */
 package org.apache.pulsar.functions.utils;
 
-import com.google.gson.Gson;
-
-import org.apache.pulsar.client.api.SubscriptionInitialPosition;
-import com.google.protobuf.InvalidProtocolBufferException;
-import com.google.protobuf.util.JsonFormat;
-import lombok.extern.slf4j.Slf4j;
-import org.apache.pulsar.client.impl.schema.JSONSchema;
-import org.apache.pulsar.common.functions.*;
-import org.apache.pulsar.common.util.Reflections;
-import org.apache.pulsar.functions.api.utils.IdentityFunction;
-import org.apache.pulsar.functions.proto.Function;
-import org.apache.pulsar.functions.proto.Function.FunctionDetails;
-import org.testng.annotations.Test;
-
-import java.lang.reflect.Field;
-import java.util.HashMap;
-import java.util.Map;
-
 import static org.apache.pulsar.common.functions.FunctionConfig.ProcessingGuarantees.EFFECTIVELY_ONCE;
 import static org.apache.pulsar.common.functions.FunctionConfig.Runtime.PYTHON;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
+import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.assertTrue;
+import com.google.gson.Gson;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.util.JsonFormat;
+import java.lang.reflect.Field;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.pulsar.client.api.CompressionType;
+import org.apache.pulsar.client.api.ConsumerCryptoFailureAction;
+import org.apache.pulsar.client.api.ProducerCryptoFailureAction;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
+import org.apache.pulsar.client.impl.schema.JSONSchema;
+import org.apache.pulsar.common.functions.ConsumerConfig;
+import org.apache.pulsar.common.functions.CryptoConfig;
+import org.apache.pulsar.common.functions.FunctionConfig;
+import org.apache.pulsar.common.functions.ProducerConfig;
+import org.apache.pulsar.common.functions.Resources;
+import org.apache.pulsar.common.functions.WindowConfig;
+import org.apache.pulsar.common.util.Reflections;
+import org.apache.pulsar.functions.api.Record;
+import org.apache.pulsar.functions.api.WindowContext;
+import org.apache.pulsar.functions.api.WindowFunction;
+import org.apache.pulsar.functions.api.utils.IdentityFunction;
+import org.apache.pulsar.functions.proto.Function;
+import org.apache.pulsar.functions.proto.Function.FunctionDetails;
+import org.testng.annotations.Test;
 
 /**
  * Unit test of {@link Reflections}.
  */
 @Slf4j
 public class FunctionConfigUtilsTest {
+    public static class WordCountWindowFunction implements WindowFunction<String, Void> {
+        @Override
+        public Void process(Collection<Record<String>> inputs, WindowContext context) throws Exception {
+            for (Record<String> input : inputs) {
+                Arrays.asList(input.getValue().split("\\.")).forEach(word -> context.incrCounter(word, 1));
+            }
+            return null;
+        }
+    }
+
+
+    @Test
+    public void testAutoAckConvertFailed() {
+
+        FunctionConfig functionConfig = new FunctionConfig();
+        functionConfig.setAutoAck(false);
+        functionConfig.setProcessingGuarantees(FunctionConfig.ProcessingGuarantees.ATMOST_ONCE);
+
+        assertThrows(IllegalArgumentException.class, () -> {
+            FunctionConfigUtils.convert(functionConfig);
+        });
+    }
 
     @Test
     public void testConvertBackFidelity() {
@@ -58,7 +91,10 @@ public class FunctionConfigUtilsTest {
         functionConfig.setParallelism(1);
         functionConfig.setClassName(IdentityFunction.class.getName());
         Map<String, ConsumerConfig> inputSpecs = new HashMap<>();
-        inputSpecs.put("test-input", ConsumerConfig.builder().isRegexPattern(true).serdeClassName("test-serde").build());
+        inputSpecs.put("test-input", ConsumerConfig.builder()
+                .isRegexPattern(true)
+                .serdeClassName("test-serde")
+                .poolMessages(true).build());
         functionConfig.setInputSpecs(inputSpecs);
         functionConfig.setOutput("test-output");
         functionConfig.setOutputSerdeClassName("test-serde");
@@ -69,15 +105,16 @@ public class FunctionConfigUtilsTest {
         functionConfig.setForwardSourceMessageProperty(true);
         functionConfig.setUserConfig(new HashMap<>());
         functionConfig.setAutoAck(true);
-        functionConfig.setTimeoutMs(2000l);
+        functionConfig.setTimeoutMs(2000L);
         functionConfig.setRuntimeFlags("-DKerberos");
         ProducerConfig producerConfig = new ProducerConfig();
         producerConfig.setMaxPendingMessages(100);
         producerConfig.setMaxPendingMessagesAcrossPartitions(1000);
         producerConfig.setUseThreadLocalProducers(true);
         producerConfig.setBatchBuilder("DEFAULT");
+        producerConfig.setCompressionType(CompressionType.ZLIB);
         functionConfig.setProducerConfig(producerConfig);
-        Function.FunctionDetails functionDetails = FunctionConfigUtils.convert(functionConfig, null);
+        Function.FunctionDetails functionDetails = FunctionConfigUtils.convert(functionConfig);
         FunctionConfig convertedConfig = FunctionConfigUtils.convertFromDetails(functionDetails);
 
         // add default resources
@@ -97,7 +134,7 @@ public class FunctionConfigUtilsTest {
         functionConfig.setNamespace("test-namespace");
         functionConfig.setName("test-function");
         functionConfig.setParallelism(1);
-        functionConfig.setClassName(IdentityFunction.class.getName());
+        functionConfig.setClassName(WordCountWindowFunction.class.getName());
         Map<String, ConsumerConfig> inputSpecs = new HashMap<>();
         inputSpecs.put("test-input", ConsumerConfig.builder().isRegexPattern(true).serdeClassName("test-serde").build());
         functionConfig.setInputSpecs(inputSpecs);
@@ -110,16 +147,21 @@ public class FunctionConfigUtilsTest {
         functionConfig.setForwardSourceMessageProperty(true);
         functionConfig.setUserConfig(new HashMap<>());
         functionConfig.setAutoAck(true);
-        functionConfig.setTimeoutMs(2000l);
+        functionConfig.setTimeoutMs(2000L);
         functionConfig.setWindowConfig(new WindowConfig().setWindowLengthCount(10));
         ProducerConfig producerConfig = new ProducerConfig();
         producerConfig.setMaxPendingMessages(100);
         producerConfig.setMaxPendingMessagesAcrossPartitions(1000);
         producerConfig.setUseThreadLocalProducers(true);
         producerConfig.setBatchBuilder("KEY_BASED");
+        producerConfig.setCompressionType(CompressionType.SNAPPY);
         functionConfig.setProducerConfig(producerConfig);
-        Function.FunctionDetails functionDetails = FunctionConfigUtils.convert(functionConfig, null);
+        Function.FunctionDetails functionDetails = FunctionConfigUtils.convert(functionConfig);
         FunctionConfig convertedConfig = FunctionConfigUtils.convertFromDetails(functionDetails);
+
+        // WindowsFunction guarantees convert to FunctionGuarantees.
+        assertEquals(convertedConfig.getWindowConfig().getProcessingGuarantees(),
+                WindowConfig.ProcessingGuarantees.valueOf(functionConfig.getProcessingGuarantees().name()));
 
         // add default resources
         functionConfig.setResources(Resources.getDefaultResources());
@@ -129,6 +171,18 @@ public class FunctionConfigUtilsTest {
                 new Gson().toJson(functionConfig),
                 new Gson().toJson(convertedConfig)
         );
+    }
+
+    @Test
+    public void testConvertBatchBuilder() {
+        FunctionConfig functionConfig = createFunctionConfig();
+        functionConfig.setBatchBuilder("KEY_BASED");
+
+        Function.FunctionDetails functionDetails = FunctionConfigUtils.convert(functionConfig);
+        assertEquals(functionDetails.getSink().getProducerSpec().getBatchBuilder(), "KEY_BASED");
+
+        FunctionConfig convertedConfig = FunctionConfigUtils.convertFromDetails(functionDetails);
+        assertEquals(convertedConfig.getProducerConfig().getBatchBuilder(), "KEY_BASED");
     }
 
     @Test
@@ -315,7 +369,7 @@ public class FunctionConfigUtilsTest {
         FunctionConfig mergedConfig = FunctionConfigUtils.validateUpdate(functionConfig, newFunctionConfig);
         assertEquals(
                 mergedConfig.getMaxMessageRetries(),
-                new Integer(10)
+                Integer.valueOf(10)
         );
         mergedConfig.setMaxMessageRetries(functionConfig.getMaxMessageRetries());
         assertEquals(
@@ -354,7 +408,7 @@ public class FunctionConfigUtilsTest {
         FunctionConfig mergedConfig = FunctionConfigUtils.validateUpdate(functionConfig, newFunctionConfig);
         assertEquals(
                 mergedConfig.getParallelism(),
-                new Integer(101)
+                Integer.valueOf(101)
         );
         mergedConfig.setParallelism(functionConfig.getParallelism());
         assertEquals(
@@ -368,8 +422,8 @@ public class FunctionConfigUtilsTest {
         FunctionConfig functionConfig = createFunctionConfig();
         Resources resources = new Resources();
         resources.setCpu(0.3);
-        resources.setRam(1232l);
-        resources.setDisk(123456l);
+        resources.setRam(1232L);
+        resources.setDisk(123456L);
         FunctionConfig newFunctionConfig = createUpdatedFunctionConfig("resources", resources);
         FunctionConfig mergedConfig = FunctionConfigUtils.validateUpdate(functionConfig, newFunctionConfig);
         assertEquals(
@@ -388,7 +442,7 @@ public class FunctionConfigUtilsTest {
         FunctionConfig functionConfig = createFunctionConfig();
         WindowConfig windowConfig = new WindowConfig();
         windowConfig.setSlidingIntervalCount(123);
-        windowConfig.setSlidingIntervalDurationMs(123l);
+        windowConfig.setSlidingIntervalDurationMs(123L);
         FunctionConfig newFunctionConfig = createUpdatedFunctionConfig("windowConfig", windowConfig);
         FunctionConfig mergedConfig = FunctionConfigUtils.validateUpdate(functionConfig, newFunctionConfig);
         assertEquals(
@@ -403,13 +457,37 @@ public class FunctionConfigUtilsTest {
     }
 
     @Test
+    public void testMergeDifferentProducerConfig() {
+        FunctionConfig functionConfig = createFunctionConfig();
+
+        ProducerConfig producerConfig = new ProducerConfig();
+        producerConfig.setMaxPendingMessages(100);
+        producerConfig.setMaxPendingMessagesAcrossPartitions(1000);
+        producerConfig.setUseThreadLocalProducers(true);
+        producerConfig.setBatchBuilder("DEFAULT");
+        producerConfig.setCompressionType(CompressionType.ZLIB);
+        FunctionConfig newFunctionConfig = createUpdatedFunctionConfig("producerConfig", producerConfig);
+
+        FunctionConfig mergedConfig = FunctionConfigUtils.validateUpdate(functionConfig, newFunctionConfig);
+        assertEquals(
+                mergedConfig.getProducerConfig(),
+                producerConfig
+        );
+        mergedConfig.setProducerConfig(functionConfig.getProducerConfig());
+        assertEquals(
+                new Gson().toJson(functionConfig),
+                new Gson().toJson(mergedConfig)
+        );
+    }
+
+    @Test
     public void testMergeDifferentTimeout() {
         FunctionConfig functionConfig = createFunctionConfig();
-        FunctionConfig newFunctionConfig = createUpdatedFunctionConfig("timeoutMs", 102l);
+        FunctionConfig newFunctionConfig = createUpdatedFunctionConfig("timeoutMs", 102L);
         FunctionConfig mergedConfig = FunctionConfigUtils.validateUpdate(functionConfig, newFunctionConfig);
         assertEquals(
                 mergedConfig.getTimeoutMs(),
-                new Long(102l)
+                Long.valueOf(102L)
         );
         mergedConfig.setTimeoutMs(functionConfig.getTimeoutMs());
         assertEquals(
@@ -455,8 +533,7 @@ public class FunctionConfigUtilsTest {
         functionConfig.setForwardSourceMessageProperty(false);
         functionConfig.setUserConfig(new HashMap<>());
         functionConfig.setAutoAck(true);
-        functionConfig.setTimeoutMs(2000l);
-        functionConfig.setWindowConfig(new WindowConfig().setWindowLengthCount(10));
+        functionConfig.setTimeoutMs(2000L);
         functionConfig.setCleanupSubscription(true);
         functionConfig.setRuntimeFlags("-Dfoo=bar");
         return functionConfig;
@@ -490,7 +567,7 @@ public class FunctionConfigUtilsTest {
         config.setForwardSourceMessageProperty(true);
         FunctionConfigUtils.inferMissingArguments(config, false);
         assertNull(config.getForwardSourceMessageProperty());
-        FunctionDetails details = FunctionConfigUtils.convert(config, FunctionConfigUtilsTest.class.getClassLoader());
+        FunctionDetails details = FunctionConfigUtils.convert(config);
         assertFalse(details.getSink().getForwardSourceMessageProperty());
         String detailsJson = "'" + JsonFormat.printer().omittingInsignificantWhitespace().print(details) + "'";
         log.info("Function details : {}", detailsJson);
@@ -572,5 +649,57 @@ public class FunctionConfigUtilsTest {
         FunctionConfig functionConfig = createFunctionConfig();
         FunctionConfig newFunctionConfig = createUpdatedFunctionConfig("outputSchemaType", "avro");
         FunctionConfigUtils.validateUpdate(functionConfig, newFunctionConfig);
+    }
+
+    @Test
+    public void testPoolMessages() {
+        FunctionConfig functionConfig = createFunctionConfig();
+        Function.FunctionDetails functionDetails = FunctionConfigUtils.convert(functionConfig);
+        assertFalse(functionDetails.getSource().getInputSpecsMap().get("test-input").getPoolMessages());
+        FunctionConfig convertedConfig = FunctionConfigUtils.convertFromDetails(functionDetails);
+        assertFalse(convertedConfig.getInputSpecs().get("test-input").isPoolMessages());
+
+        Map<String, ConsumerConfig> inputSpecs = new HashMap<>();
+        inputSpecs.put("test-input", ConsumerConfig.builder()
+                .poolMessages(true).build());
+        functionConfig.setInputSpecs(inputSpecs);
+
+        functionDetails = FunctionConfigUtils.convert(functionConfig);
+        assertTrue(functionDetails.getSource().getInputSpecsMap().get("test-input").getPoolMessages());
+
+        convertedConfig = FunctionConfigUtils.convertFromDetails(functionDetails);
+        assertTrue(convertedConfig.getInputSpecs().get("test-input").isPoolMessages());
+    }
+
+    @Test
+    public void testConvertProducerSpecToProducerConfigAndBackToProducerSpec() {
+        // given
+        Function.ProducerSpec producerSpec = Function.ProducerSpec.newBuilder()
+                .setBatchBuilder("KEY_BASED")
+                .setCompressionType(Function.CompressionType.ZSTD)
+                .setCryptoSpec(Function.CryptoSpec.newBuilder()
+                        .addProducerEncryptionKeyName("key1")
+                        .addProducerEncryptionKeyName("key2")
+                        .setConsumerCryptoFailureAction(Function.CryptoSpec.FailureAction.DISCARD)
+                        .setProducerCryptoFailureAction(Function.CryptoSpec.FailureAction.SEND)
+                        .setCryptoKeyReaderClassName("ReaderClassName")
+                        .setCryptoKeyReaderConfig("{\"key\":\"value\"}")
+                        .build())
+                .build();
+        // when
+        ProducerConfig producerConfig = FunctionConfigUtils.convertProducerSpecToProducerConfig(producerSpec);
+        // then
+        assertEquals(producerConfig.getBatchBuilder(), "KEY_BASED");
+        assertEquals(producerConfig.getCompressionType(), CompressionType.ZSTD);
+        CryptoConfig cryptoConfig = producerConfig.getCryptoConfig();
+        assertEquals(cryptoConfig.getProducerCryptoFailureAction(), ProducerCryptoFailureAction.SEND);
+        assertEquals(cryptoConfig.getConsumerCryptoFailureAction(), ConsumerCryptoFailureAction.DISCARD);
+        assertEquals(cryptoConfig.getEncryptionKeys(), new String[]{"key1", "key2"});
+        assertEquals(cryptoConfig.getCryptoKeyReaderClassName(), "ReaderClassName");
+        // and when
+        // converted back to producer spec
+        Function.ProducerSpec producerSpec2 = FunctionConfigUtils.convertProducerConfigToProducerSpec(producerConfig);
+        // then
+        assertEquals(producerSpec2, producerSpec);
     }
 }

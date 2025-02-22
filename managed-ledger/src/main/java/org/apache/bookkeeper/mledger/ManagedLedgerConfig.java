@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,22 +19,21 @@
 package org.apache.bookkeeper.mledger;
 
 import static com.google.common.base.Preconditions.checkArgument;
-
-import com.google.common.base.Charsets;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-
+import lombok.Getter;
+import lombok.Setter;
 import org.apache.bookkeeper.client.EnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.api.DigestType;
-
 import org.apache.bookkeeper.common.annotation.InterfaceAudience;
 import org.apache.bookkeeper.common.annotation.InterfaceStability;
 import org.apache.bookkeeper.mledger.impl.NullLedgerOffloader;
-
 import org.apache.bookkeeper.mledger.intercept.ManagedLedgerInterceptor;
-import org.apache.pulsar.common.util.collections.ConcurrentOpenLongPairRangeSet;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.pulsar.common.util.collections.OpenLongPairRangeSet;
 
 /**
  * Configuration class for a ManagedLedger.
@@ -46,8 +45,9 @@ public class ManagedLedgerConfig {
     private boolean createIfMissing = true;
     private int maxUnackedRangesToPersist = 10000;
     private int maxBatchDeletedIndexToPersist = 10000;
+    private boolean persistentUnackedRangesWithMultipleEntriesEnabled = false;
     private boolean deletionAtBatchIndexLevelEnabled = true;
-    private int maxUnackedRangesToPersistInZk = 1000;
+    private int maxUnackedRangesToPersistInMetadataStore = 1000;
     private int maxEntriesPerLedger = 50000;
     private int maxSizePerLedgerMb = 100;
     private int minimumRolloverTimeMs = 0;
@@ -64,12 +64,13 @@ public class ManagedLedgerConfig {
     private long retentionTimeMs = 0;
     private long retentionSizeInMB = 0;
     private boolean autoSkipNonRecoverableData;
+    private boolean ledgerForceRecovery;
     private boolean lazyCursorRecovery = false;
     private long metadataOperationsTimeoutSeconds = 60;
     private long readEntryTimeoutSeconds = 120;
     private long addEntryTimeoutSeconds = 120;
     private DigestType digestType = DigestType.CRC32C;
-    private byte[] password = "".getBytes(Charsets.UTF_8);
+    private byte[] password = "".getBytes(StandardCharsets.UTF_8);
     private boolean unackedRangesOpenCacheSetEnabled = true;
     private Class<? extends EnsemblePlacementPolicy>  bookKeeperEnsemblePlacementPolicyClassName;
     private Map<String, Object> bookKeeperEnsemblePlacementPolicyProperties;
@@ -77,6 +78,23 @@ public class ManagedLedgerConfig {
     private int newEntriesCheckDelayInMillis = 10;
     private Clock clock = Clock.systemUTC();
     private ManagedLedgerInterceptor managedLedgerInterceptor;
+    private Map<String, String> properties;
+    private int inactiveLedgerRollOverTimeMs = 0;
+    @Getter
+    @Setter
+    private boolean cacheEvictionByMarkDeletedPosition = false;
+    private int minimumBacklogCursorsForCaching = 0;
+    private int minimumBacklogEntriesForCaching = 1000;
+    private int maxBacklogBetweenCursorsForCaching = 1000;
+    private boolean triggerOffloadOnTopicLoad = false;
+    @Getter
+    @Setter
+    private String storageClassName;
+    @Getter
+    @Setter
+    private String shadowSourceName;
+    @Getter
+    private boolean persistIndividualAckAsLongArray;
 
     public boolean isCreateIfMissing() {
         return createIfMissing;
@@ -84,6 +102,11 @@ public class ManagedLedgerConfig {
 
     public ManagedLedgerConfig setCreateIfMissing(boolean createIfMissing) {
         this.createIfMissing = createIfMissing;
+        return this;
+    }
+
+    public ManagedLedgerConfig setPersistIndividualAckAsLongArray(boolean persistIndividualAckAsLongArray) {
+        this.persistIndividualAckAsLongArray = persistIndividualAckAsLongArray;
         return this;
     }
 
@@ -264,12 +287,12 @@ public class ManagedLedgerConfig {
      *            the password to set
      */
     public ManagedLedgerConfig setPassword(String password) {
-        this.password = password.getBytes(Charsets.UTF_8);
+        this.password = password.getBytes(StandardCharsets.UTF_8);
         return this;
     }
 
     /**
-     * should use {@link ConcurrentOpenLongPairRangeSet} to store unacked ranges.
+     * should use {@link OpenLongPairRangeSet} to store unacked ranges.
      * @return
      */
     public boolean isUnackedRangesOpenCacheSetEnabled() {
@@ -385,13 +408,13 @@ public class ManagedLedgerConfig {
      * Set the retention time for the ManagedLedger.
      * <p>
      * Retention time and retention size ({@link #setRetentionSizeInMB(long)}) are together used to retain the
-     * ledger data when when there are no cursors or when all the cursors have marked the data for deletion.
+     * ledger data when there are no cursors or when all the cursors have marked the data for deletion.
      * Data will be deleted in this case when both retention time and retention size settings don't prevent deleting
      * the data marked for deletion.
      * <p>
      * A retention time of 0 (default) will make data to be deleted immediately.
      * <p>
-     * A retention time of -1 , means to have an unlimited retention time.
+     * A retention time of -1, means to have an unlimited retention time.
      *
      * @param retentionTime
      *            duration for which messages should be retained
@@ -415,13 +438,13 @@ public class ManagedLedgerConfig {
      * The retention size is used to set a maximum retention size quota on the ManagedLedger.
      * <p>
      * Retention size and retention time ({@link #setRetentionTime(int, TimeUnit)}) are together used to retain the
-     * ledger data when when there are no cursors or when all the cursors have marked the data for deletion.
+     * ledger data when there are no cursors or when all the cursors have marked the data for deletion.
      * Data will be deleted in this case when both retention time and retention size settings don't prevent deleting
      * the data marked for deletion.
      * <p>
      * A retention size of 0 (default) will make data to be deleted immediately.
      * <p>
-     * A retention size of -1 , means to have an unlimited retention size.
+     * A retention size of -1, means to have an unlimited retention size.
      *
      * @param retentionSizeInMB
      *            quota for message retention
@@ -453,6 +476,17 @@ public class ManagedLedgerConfig {
     }
 
     /**
+     * Skip managed ledger failure to recover managed ledger forcefully.
+     */
+    public boolean isLedgerForceRecovery() {
+        return ledgerForceRecovery;
+    }
+
+    public void setLedgerForceRecovery(boolean ledgerForceRecovery) {
+        this.ledgerForceRecovery = ledgerForceRecovery;
+    }
+
+    /**
      * @return max unacked message ranges that will be persisted and recovered.
      *
      */
@@ -465,6 +499,14 @@ public class ManagedLedgerConfig {
      */
     public int getMaxBatchDeletedIndexToPersist() {
         return maxBatchDeletedIndexToPersist;
+    }
+
+    public boolean isPersistentUnackedRangesWithMultipleEntriesEnabled() {
+        return persistentUnackedRangesWithMultipleEntriesEnabled;
+    }
+
+    public void setPersistentUnackedRangesWithMultipleEntriesEnabled(boolean multipleEntriesEnabled) {
+        this.persistentUnackedRangesWithMultipleEntriesEnabled = multipleEntriesEnabled;
     }
 
     /**
@@ -480,12 +522,14 @@ public class ManagedLedgerConfig {
      * @return max unacked message ranges up to which it can store in Zookeeper
      *
      */
-    public int getMaxUnackedRangesToPersistInZk() {
-        return maxUnackedRangesToPersistInZk;
+    public int getMaxUnackedRangesToPersistInMetadataStore() {
+        return maxUnackedRangesToPersistInMetadataStore;
     }
 
-    public void setMaxUnackedRangesToPersistInZk(int maxUnackedRangesToPersistInZk) {
-        this.maxUnackedRangesToPersistInZk = maxUnackedRangesToPersistInZk;
+    public ManagedLedgerConfig setMaxUnackedRangesToPersistInMetadataStore(
+            int maxUnackedRangesToPersistInMetadataStore) {
+        this.maxUnackedRangesToPersistInMetadataStore = maxUnackedRangesToPersistInMetadataStore;
+        return this;
     }
 
     /**
@@ -510,7 +554,7 @@ public class ManagedLedgerConfig {
     }
 
     /**
-     * Get clock to use to time operations
+     * Get clock to use to time operations.
      *
      * @return a clock
      */
@@ -519,7 +563,7 @@ public class ManagedLedgerConfig {
     }
 
     /**
-     * Set clock to use for time operations
+     * Set clock to use for time operations.
      *
      * @param clock the clock to use
      */
@@ -530,7 +574,7 @@ public class ManagedLedgerConfig {
 
     /**
      *
-     * Ledger-Op (Create/Delete) timeout
+     * Ledger-Op (Create/Delete) timeout.
      *
      * @return
      */
@@ -539,7 +583,7 @@ public class ManagedLedgerConfig {
     }
 
     /**
-     * Ledger-Op (Create/Delete) timeout after which callback will be completed with failure
+     * Ledger-Op (Create/Delete) timeout after which callback will be completed with failure.
      *
      * @param metadataOperationsTimeoutSeconds
      */
@@ -549,7 +593,7 @@ public class ManagedLedgerConfig {
     }
 
     /**
-     * Ledger read-entry timeout
+     * Ledger read-entry timeout.
      *
      * @return
      */
@@ -558,7 +602,7 @@ public class ManagedLedgerConfig {
     }
 
     /**
-     * Ledger read entry timeout after which callback will be completed with failure. (disable timeout by setting
+     * Ledger read entry timeout after which callback will be completed with failure. (disable timeout by setting.
      * readTimeoutSeconds <= 0)
      *
      * @param readEntryTimeoutSeconds
@@ -623,6 +667,16 @@ public class ManagedLedgerConfig {
         this.bookKeeperEnsemblePlacementPolicyProperties = bookKeeperEnsemblePlacementPolicyProperties;
     }
 
+
+    public Map<String, String> getProperties() {
+        return properties;
+    }
+
+
+    public void setProperties(Map<String, String> properties) {
+        this.properties = properties;
+    }
+
     public boolean isDeletionAtBatchIndexLevelEnabled() {
         return deletionAtBatchIndexLevelEnabled;
     }
@@ -646,4 +700,97 @@ public class ManagedLedgerConfig {
     public void setManagedLedgerInterceptor(ManagedLedgerInterceptor managedLedgerInterceptor) {
         this.managedLedgerInterceptor = managedLedgerInterceptor;
     }
+
+    public int getInactiveLedgerRollOverTimeMs() {
+        return inactiveLedgerRollOverTimeMs;
+    }
+
+    /**
+     * Set rollOver time for inactive ledgers.
+     *
+     * @param inactiveLedgerRollOverTimeMs
+     * @param unit
+     */
+    public void setInactiveLedgerRollOverTime(int inactiveLedgerRollOverTimeMs, TimeUnit unit) {
+        this.inactiveLedgerRollOverTimeMs = (int) unit.toMillis(inactiveLedgerRollOverTimeMs);
+    }
+
+    /**
+     * Minimum cursors with backlog after which broker is allowed to cache read entries to reuse them for other cursors'
+     * backlog reads. (Default = 0, broker will not cache backlog reads)
+     *
+     * @return
+     */
+    public int getMinimumBacklogCursorsForCaching() {
+        return minimumBacklogCursorsForCaching;
+    }
+
+    /**
+     * Set Minimum cursors with backlog after which broker is allowed to cache read entries to reuse them for other
+     * cursors' backlog reads.
+     *
+     * @param minimumBacklogCursorsForCaching
+     */
+    public void setMinimumBacklogCursorsForCaching(int minimumBacklogCursorsForCaching) {
+        this.minimumBacklogCursorsForCaching = minimumBacklogCursorsForCaching;
+    }
+
+    /**
+     * Minimum backlog should exist to leverage caching for backlog reads.
+     *
+     * @return
+     */
+    public int getMinimumBacklogEntriesForCaching() {
+        return minimumBacklogEntriesForCaching;
+    }
+
+    /**
+     * Set Minimum backlog after that broker will start caching backlog reads.
+     *
+     * @param minimumBacklogEntriesForCaching
+     */
+    public void setMinimumBacklogEntriesForCaching(int minimumBacklogEntriesForCaching) {
+        this.minimumBacklogEntriesForCaching = minimumBacklogEntriesForCaching;
+    }
+
+    /**
+     * Max backlog gap between backlogged cursors while caching to avoid caching entry which can be
+     * invalidated before other backlog cursor can reuse it from cache.
+     *
+     * @return
+     */
+    public int getMaxBacklogBetweenCursorsForCaching() {
+        return maxBacklogBetweenCursorsForCaching;
+    }
+
+    /**
+     * Set maximum backlog distance between backlogged curosr to avoid caching unused entry.
+     *
+     * @param maxBacklogBetweenCursorsForCaching
+     */
+    public void setMaxBacklogBetweenCursorsForCaching(int maxBacklogBetweenCursorsForCaching) {
+        this.maxBacklogBetweenCursorsForCaching = maxBacklogBetweenCursorsForCaching;
+    }
+
+    /**
+     * Trigger offload on topic load.
+     * @return
+     */
+    public boolean isTriggerOffloadOnTopicLoad() {
+        return triggerOffloadOnTopicLoad;
+    }
+
+    /**
+     * Set trigger offload on topic load.
+     * @param triggerOffloadOnTopicLoad
+     */
+    public void setTriggerOffloadOnTopicLoad(boolean triggerOffloadOnTopicLoad) {
+        this.triggerOffloadOnTopicLoad = triggerOffloadOnTopicLoad;
+    }
+
+    public String getShadowSource() {
+        return MapUtils.getString(properties, PROPERTY_SOURCE_TOPIC_KEY);
+    }
+
+    public static final String PROPERTY_SOURCE_TOPIC_KEY = "PULSAR.SHADOW_SOURCE";
 }

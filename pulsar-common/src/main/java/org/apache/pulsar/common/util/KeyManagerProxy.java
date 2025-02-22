@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.common.util;
 
+import io.netty.handler.ssl.SslContext;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,17 +30,17 @@ import java.security.NoSuchAlgorithmException;
 import java.security.Principal;
 import java.security.PrivateKey;
 import java.security.UnrecoverableKeyException;
+import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-
+import java.util.stream.Collectors;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.X509ExtendedKeyManager;
-
-import io.netty.handler.ssl.SslContext;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -73,32 +74,33 @@ public class KeyManagerProxy extends X509ExtendedKeyManager {
                 TimeUnit.SECONDS);
     }
 
-    public void updateKeyManagerSafely() {
+    private void updateKeyManagerSafely() {
         try {
+            if (log.isDebugEnabled()) {
+                log.debug("refreshing key manager for {} {}", certFile.getFileName(), keyFile.getFileName());
+            }
             updateKeyManager();
         } catch (Exception e) {
             log.warn("Failed to update key Manager for {}, {}", certFile.getFileName(), keyFile.getFileName(), e);
         }
     }
 
-    public void updateKeyManager()
+    private void updateKeyManager()
             throws CertificateException, KeyStoreException, NoSuchAlgorithmException, UnrecoverableKeyException {
         if (keyManager != null && !certFile.checkAndRefresh() && !keyFile.checkAndRefresh()) {
             return;
         }
-        log.info("refreshing key manager for {} {}", certFile.getFileName(), keyFile.getFileName());
-        X509Certificate certificate;
-        PrivateKey privateKey = null;
-        KeyStore keyStore;
-        try (InputStream publicCertStream = new FileInputStream(certFile.getFileName());
-                InputStream privateKeyStream = new FileInputStream(keyFile.getFileName())) {
+
+        final KeyStore keyStore;
+        try (InputStream publicCertStream = new FileInputStream(certFile.getFileName())) {
             final CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            certificate = (X509Certificate) cf.generateCertificate(publicCertStream);
+            final List<X509Certificate> certificateList = cf.generateCertificates(publicCertStream)
+                    .stream().map(o -> (X509Certificate) o).collect(Collectors.toList());
             keyStore = KeyStore.getInstance("JKS");
-            String alias = certificate.getSubjectX500Principal().getName();
-            privateKey = SecurityUtility.loadPrivateKeyFromPemFile(keyFile.getFileName());
+            final String alias = certificateList.get(0).getSubjectX500Principal().getName();
+            final PrivateKey privateKey = SecurityUtility.loadPrivateKeyFromPemFile(keyFile.getFileName());
             keyStore.load(null);
-            keyStore.setKeyEntry(alias, privateKey, KEYSTORE_PASSWORD, new X509Certificate[] { certificate });
+            keyStore.setKeyEntry(alias, privateKey, KEYSTORE_PASSWORD, certificateList.toArray(new Certificate[0]));
         } catch (IOException | KeyManagementException e) {
             throw new IllegalArgumentException(e);
         }

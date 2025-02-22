@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -43,37 +43,79 @@ class ProtocolHandlerWithClassLoader implements ProtocolHandler {
 
     @Override
     public String protocolName() {
-        return handler.protocolName();
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            return handler.protocolName();
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public boolean accept(String protocol) {
-        return handler.accept(protocol);
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            return handler.accept(protocol);
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public void initialize(ServiceConfiguration conf) throws Exception {
-        handler.initialize(conf);
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            handler.initialize(conf);
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public String getProtocolDataToAdvertise() {
-        return handler.getProtocolDataToAdvertise();
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            return handler.getProtocolDataToAdvertise();
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public void start(BrokerService service) {
-        handler.start(service);
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            handler.start(service);
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public Map<InetSocketAddress, ChannelInitializer<SocketChannel>> newChannelInitializers() {
-        return handler.newChannelInitializers();
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            return handler.newChannelInitializers();
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public void close() {
-        handler.close();
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            handler.close();
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
         try {
             classLoader.close();
         } catch (IOException e) {

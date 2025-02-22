@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -106,7 +106,7 @@ public class BuildersTest {
     @Test(expectedExceptions = {PulsarClientException.class}, expectedExceptionsMessageRegExp = ".* must be specified but they cannot be specified at the same time.*")
     public void shouldNotSetTwoOptAtTheSameTime() throws Exception {
         PulsarClient client = PulsarClient.builder().serviceUrl("pulsar://localhost:6650").build();
-        try (Reader reader = client.newReader().topic("abc").startMessageId(MessageId.earliest)
+        try (Reader reader = client.newReader().topic("abc").startMessageId(MessageId.latest)
                 .startMessageFromRollbackDuration(10, TimeUnit.HOURS).create()) {
             // no-op
         } finally {

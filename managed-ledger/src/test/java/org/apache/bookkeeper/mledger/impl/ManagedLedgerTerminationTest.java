@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -31,6 +31,7 @@ import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerTerminatedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.NoMoreEntriesToReadException;
 import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.test.MockedBookKeeperTestCase;
 import org.testng.annotations.Test;
 
@@ -141,7 +142,7 @@ public class ManagedLedgerTerminationTest extends MockedBookKeeperTestCase {
         assertTrue(ledger.isTerminated());
         assertEquals(lastPosition, p1);
 
-        ManagedCursor c1 = ledger.newNonDurableCursor(PositionImpl.earliest);
+        ManagedCursor c1 = ledger.newNonDurableCursor(PositionFactory.EARLIEST);
 
         List<Entry> entries = c1.readEntries(10);
         assertEquals(entries.size(), 2);

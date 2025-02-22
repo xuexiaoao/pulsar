@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,12 +18,15 @@
  */
 package org.apache.pulsar.io.rabbitmq.sink;
 
+import static org.mockito.Mockito.mock;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import org.apache.pulsar.functions.api.Record;
 import org.apache.pulsar.functions.instance.SinkRecord;
+import org.apache.pulsar.io.core.SinkContext;
 import org.apache.pulsar.io.rabbitmq.RabbitMQBrokerManager;
 import org.apache.pulsar.io.rabbitmq.RabbitMQSink;
 import org.awaitility.Awaitility;
@@ -46,7 +49,7 @@ public class RabbitMQSinkTest {
     }
 
     @Test
-    public void TestOpenAndWriteSink() throws Exception {
+    public void testOpenAndWriteSink() throws Exception {
         Map<String, Object> configs = new HashMap<>();
         configs.put("host", "localhost");
         configs.put("port", "5673");
@@ -66,7 +69,9 @@ public class RabbitMQSinkTest {
 
         // open should success
         // rabbitmq service may need time to initialize
-        Awaitility.await().ignoreExceptions().untilAsserted(() -> sink.open(configs, null));
+        SinkContext sinkContext = mock(SinkContext.class);
+        Awaitility.await().ignoreExceptions().pollDelay(Duration.ofSeconds(1))
+                .untilAsserted(() -> sink.open(configs, sinkContext));
 
         // write should success
         Record<byte[]> record = build("test-topic", "fakeKey", "fakeValue", "fakeRoutingKey");
@@ -78,10 +83,6 @@ public class RabbitMQSinkTest {
     private Record<byte[]> build(String topic, String key, String value, String routingKey) {
         // prepare a SinkRecord
         SinkRecord<byte[]> record = new SinkRecord<>(new Record<byte[]>() {
-            @Override
-            public Optional<String> getKey() {
-                return Optional.empty();
-            }
 
             @Override
             public byte[] getValue() {

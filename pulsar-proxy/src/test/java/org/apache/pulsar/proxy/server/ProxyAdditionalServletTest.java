@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -25,7 +25,10 @@ import okhttp3.Response;
 import org.apache.commons.lang3.RandomUtils;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.broker.authentication.AuthenticationService;
+import org.apache.pulsar.client.api.Authentication;
+import org.apache.pulsar.client.api.AuthenticationFactory;
 import org.apache.pulsar.common.configuration.PulsarConfigurationLoader;
+import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.metadata.impl.ZKMetadataStore;
 import org.apache.pulsar.broker.web.plugin.servlet.AdditionalServletWithClassLoader;
 import org.apache.pulsar.broker.web.plugin.servlet.AdditionalServlets;
@@ -65,6 +68,8 @@ public class ProxyAdditionalServletTest extends MockedPulsarServiceBaseTest {
     private ProxyService proxyService;
     private WebServer proxyWebServer;
     private ProxyConfiguration proxyConfig = new ProxyConfiguration();
+    private Authentication proxyClientAuthentication;
+    private Map<String, String> responseHeaders = new HashMap<>();
 
     @Override
     @BeforeClass
@@ -72,19 +77,30 @@ public class ProxyAdditionalServletTest extends MockedPulsarServiceBaseTest {
         internalSetup();
 
         proxyConfig.setServicePort(Optional.of(0));
+        proxyConfig.setBrokerProxyAllowedTargetPorts("*");
         proxyConfig.setWebServicePort(Optional.of(0));
-        proxyConfig.setZookeeperServers(DUMMY_VALUE);
-        proxyConfig.setConfigurationStoreServers(GLOBAL_DUMMY_VALUE);
+        proxyConfig.setMetadataStoreUrl(DUMMY_VALUE);
+        proxyConfig.setConfigurationMetadataStoreUrl(GLOBAL_DUMMY_VALUE);
         // enable full parsing feature
         proxyConfig.setProxyLogLevel(Optional.of(2));
+        proxyConfig.setClusterName(configClusterName);
+        responseHeaders.put("header1", "value1");
+        proxyConfig.setProxyHttpResponseHeadersJson(
+                ObjectMapperFactory.getMapper().writer().writeValueAsString(responseHeaders));
 
         // this is for nar package test
 //        addServletNar();
 
+        proxyClientAuthentication = AuthenticationFactory.create(proxyConfig.getBrokerClientAuthenticationPlugin(),
+                proxyConfig.getBrokerClientAuthenticationParameters());
+        proxyClientAuthentication.start();
+
         proxyService = Mockito.spy(new ProxyService(proxyConfig,
-                new AuthenticationService(PulsarConfigurationLoader.convertFrom(proxyConfig))));
-        doReturn(new ZKMetadataStore(mockZooKeeper)).when(proxyService).createLocalMetadataStore();
-        doReturn(new ZKMetadataStore(mockZooKeeperGlobal)).when(proxyService).createConfigurationMetadataStore();
+                new AuthenticationService(PulsarConfigurationLoader.convertFrom(proxyConfig)),
+                proxyClientAuthentication));
+        doReturn(registerCloseable(new ZKMetadataStore(mockZooKeeper))).when(proxyService).createLocalMetadataStore();
+        doReturn(registerCloseable(new ZKMetadataStore(mockZooKeeperGlobal))).when(proxyService)
+                .createConfigurationMetadataStore();
 
         Optional<Integer> proxyLogLevel = Optional.of(2);
         assertEquals(proxyLogLevel, proxyService.getConfiguration().getProxyLogLevel());
@@ -96,7 +112,7 @@ public class ProxyAdditionalServletTest extends MockedPulsarServiceBaseTest {
         mockAdditionalServlet();
 
         proxyWebServer = new WebServer(proxyConfig, authService);
-        ProxyServiceStarter.addWebServerHandlers(proxyWebServer, proxyConfig, proxyService, null);
+        ProxyServiceStarter.addWebServerHandlers(proxyWebServer, proxyConfig, proxyService, null, proxyClientAuthentication);
         proxyWebServer.start();
     }
 
@@ -176,6 +192,10 @@ public class ProxyAdditionalServletTest extends MockedPulsarServiceBaseTest {
         internalCleanup();
 
         proxyService.close();
+        proxyWebServer.stop();
+        if (proxyClientAuthentication != null) {
+            proxyClientAuthentication.close();
+        }
     }
 
     @Test
@@ -183,11 +203,15 @@ public class ProxyAdditionalServletTest extends MockedPulsarServiceBaseTest {
         int httpPort = proxyWebServer.getListenPortHTTP().get();
         log.info("proxy service httpPort {}", httpPort);
         String paramValue = "value - " + RandomUtils.nextInt();
-        String response = httpGet("http://localhost:" + httpPort + BASE_PATH + "?" + QUERY_PARAM + "=" + paramValue);
+        final Map<String, String> headers = new HashMap<>();
+        String response = httpGet("http://localhost:" + httpPort + BASE_PATH + "?" + QUERY_PARAM + "=" + paramValue,
+                headers);
         Assert.assertEquals(response, paramValue);
+        String headerKey = "header1";
+        Assert.assertEquals(headers.get(headerKey), responseHeaders.get(headerKey));
     }
 
-    String httpGet(String url) throws IOException {
+    String httpGet(String url, Map<String, String> headers) throws IOException {
         OkHttpClient client = new OkHttpClient();
         okhttp3.Request request = new okhttp3.Request.Builder()
                 .get()
@@ -195,6 +219,9 @@ public class ProxyAdditionalServletTest extends MockedPulsarServiceBaseTest {
                 .build();
 
         try (Response response = client.newCall(request).execute()) {
+            response.headers().forEach(pair -> {
+                headers.put(pair.getFirst(), pair.getSecond());
+            });
             return response.body().string();
         }
     }

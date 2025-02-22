@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -58,7 +58,8 @@ public class Packages extends PackagesBase {
             @ApiResponse(code = 200, message = "Return the metadata of the specified package."),
             @ApiResponse(code = 404, message = "The specified package is not existent."),
             @ApiResponse(code = 412, message = "The package name is illegal."),
-            @ApiResponse(code = 500, message = "Internal server error.")
+            @ApiResponse(code = 500, message = "Internal server error."),
+            @ApiResponse(code = 503, message = "Package Management Service is not enabled in the broker.")
         }
     )
     public void getMeta(
@@ -79,10 +80,11 @@ public class Packages extends PackagesBase {
     )
     @ApiResponses(
         value = {
-            @ApiResponse(code = 200, message = "Update the metadata of the specified package successfully."),
+            @ApiResponse(code = 204, message = "Update the metadata of the specified package successfully."),
             @ApiResponse(code = 404, message = "The specified package is not existent."),
             @ApiResponse(code = 412, message = "The package name is illegal."),
-            @ApiResponse(code = 500, message = "Internal server error.")
+            @ApiResponse(code = 500, message = "Internal server error."),
+            @ApiResponse(code = 503, message = "Package Management Service is not enabled in the broker.")
         }
     )
     @Consumes(MediaType.APPLICATION_JSON)
@@ -111,9 +113,10 @@ public class Packages extends PackagesBase {
     )
     @ApiResponses(
         value = {
-            @ApiResponse(code = 200, message = "Upload the specified package successfully."),
+            @ApiResponse(code = 204, message = "Upload the specified package successfully."),
             @ApiResponse(code = 412, message = "The package name is illegal."),
-            @ApiResponse(code = 500, message = "Internal server error.")
+            @ApiResponse(code = 500, message = "Internal server error."),
+            @ApiResponse(code = 503, message = "Package Management Service is not enabled in the broker.")
         }
     )
     @Consumes(MediaType.MULTIPART_FORM_DATA)
@@ -148,7 +151,8 @@ public class Packages extends PackagesBase {
             @ApiResponse(code = 200, message = "Download the specified package successfully."),
             @ApiResponse(code = 404, message = "The specified package is not existent."),
             @ApiResponse(code = 412, message = "The package name is illegal."),
-            @ApiResponse(code = 500, message = "Internal server error.")
+            @ApiResponse(code = 500, message = "Internal server error."),
+            @ApiResponse(code = 503, message = "Package Management Service is not enabled in the broker.")
         }
     )
     public StreamingOutput download(
@@ -165,10 +169,11 @@ public class Packages extends PackagesBase {
     @Path("/{type}/{tenant}/{namespace}/{packageName}/{version}")
     @ApiResponses(
         value = {
-            @ApiResponse(code = 200, message = "Delete the specified package successfully."),
+            @ApiResponse(code = 204, message = "Delete the specified package successfully."),
             @ApiResponse(code = 404, message = "The specified package is not existent."),
             @ApiResponse(code = 412, message = "The package name is illegal."),
-            @ApiResponse(code = 500, message = "Internal server error.")
+            @ApiResponse(code = 500, message = "Internal server error."),
+            @ApiResponse(code = 503, message = "Package Management Service is not enabled in the broker.")
         }
     )
     @ApiOperation(value = "Delete a package with the package name.")
@@ -195,7 +200,8 @@ public class Packages extends PackagesBase {
             @ApiResponse(code = 200, message = "Return the package versions of the specified package."),
             @ApiResponse(code = 404, message = "The specified package is not existent."),
             @ApiResponse(code = 412, message = "The package name is illegal."),
-            @ApiResponse(code = 500, message = "Internal server error.")
+            @ApiResponse(code = 500, message = "Internal server error."),
+            @ApiResponse(code = 503, message = "Package Management Service is not enabled in the broker.")
         }
     )
     public void listPackageVersion(
@@ -212,14 +218,16 @@ public class Packages extends PackagesBase {
     @Path("/{type}/{tenant}/{namespace}")
     @ApiOperation(
         value = "Get all the specified type packages in a namespace.",
-        response = PackageMetadata.class
+        response = PackageMetadata.class,
+        responseContainer = "List"
     )
     @ApiResponses(
         value = {
             @ApiResponse(code = 200, message =
                 "Return all the specified type package names in the specified namespace."),
             @ApiResponse(code = 412, message = "The package type is illegal."),
-            @ApiResponse(code = 500, message = "Internal server error.")
+            @ApiResponse(code = 500, message = "Internal server error."),
+            @ApiResponse(code = 503, message = "Package Management Service is not enabled in the broker.")
         }
     )
     public void listPackages(

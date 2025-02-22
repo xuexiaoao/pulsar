@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,13 +21,12 @@ package org.apache.pulsar.io.redis;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.net.HostAndPort;
+import java.io.Serializable;
+import java.util.List;
 import lombok.Data;
 import lombok.experimental.Accessors;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.io.core.annotations.FieldDoc;
-
-import java.io.Serializable;
-import java.util.List;
 
 /**
  * Configuration object for all Redis Sink components.
@@ -89,13 +88,11 @@ public class RedisAbstractConfig implements Serializable {
 
     @FieldDoc(
         required = false,
-        defaultValue = "10000L",
+        defaultValue = "10000",
         help = "The amount of time in milliseconds to wait before timing out when connecting")
     private long connectTimeout = 10000L;
 
     public void validate() {
-        Preconditions.checkNotNull(redisHosts, "redisHosts property not set.");
-        Preconditions.checkNotNull(redisDatabase, "redisDatabase property not set.");
         Preconditions.checkNotNull(clientMode, "clientMode property not set.");
     }
 
@@ -106,7 +103,6 @@ public class RedisAbstractConfig implements Serializable {
 
     public List<HostAndPort> getHostAndPorts() {
         List<HostAndPort> hostAndPorts = Lists.newArrayList();
-        Preconditions.checkNotNull(redisHosts, "redisHosts property not set.");
         String[] hosts = StringUtils.split(redisHosts, ",");
         for (String host : hosts) {
             HostAndPort hostAndPort = HostAndPort.fromString(host);

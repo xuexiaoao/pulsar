@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,7 +18,11 @@
  */
 package org.apache.pulsar.client.impl;
 
+import lombok.Cleanup;
 import org.apache.pulsar.client.util.RetryUtil;
+import org.apache.pulsar.common.util.Backoff;
+import org.apache.pulsar.common.util.BackoffBuilder;
+import org.apache.pulsar.common.util.FutureUtil;
 import org.testng.annotations.Test;
 
 import java.util.concurrent.CompletableFuture;
@@ -36,6 +40,7 @@ public class RetryUtilTest {
 
     @Test
     public void testFailAndRetry() throws Exception {
+        @Cleanup("shutdownNow")
         ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
         CompletableFuture<Boolean> callback = new CompletableFuture<>();
         AtomicInteger atomicInteger = new AtomicInteger(0);
@@ -45,19 +50,22 @@ public class RetryUtilTest {
                 .setMandatoryStop(5000, TimeUnit.MILLISECONDS)
                 .create();
         RetryUtil.retryAsynchronously(() -> {
+            CompletableFuture<Boolean> future = new CompletableFuture<>();
             atomicInteger.incrementAndGet();
             if (atomicInteger.get() < 5) {
-                throw new RuntimeException("fail");
+                future.completeExceptionally(new RuntimeException("fail"));
+            } else {
+                future.complete(true);
             }
-            return true;
+            return future;
         }, backoff, executor, callback);
         assertTrue(callback.get());
         assertEquals(atomicInteger.get(), 5);
-        executor.shutdownNow();
     }
 
     @Test
     public void testFail() throws Exception {
+        @Cleanup("shutdownNow")
         ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
         CompletableFuture<Boolean> callback = new CompletableFuture<>();
         Backoff backoff = new BackoffBuilder()
@@ -66,9 +74,8 @@ public class RetryUtilTest {
                 .setMandatoryStop(5000, TimeUnit.MILLISECONDS)
                 .create();
         long start = System.currentTimeMillis();
-        RetryUtil.retryAsynchronously(() -> {
-            throw new RuntimeException("fail");
-        }, backoff, executor, callback);
+        RetryUtil.retryAsynchronously(() ->
+                FutureUtil.failedFuture(new RuntimeException("fail")), backoff, executor, callback);
         try {
             callback.get();
         } catch (Exception e) {
@@ -76,6 +83,5 @@ public class RetryUtilTest {
         }
         long time = System.currentTimeMillis() - start;
         assertTrue(time >= 5000 - 2000, "Duration:" + time);
-        executor.shutdownNow();
     }
 }

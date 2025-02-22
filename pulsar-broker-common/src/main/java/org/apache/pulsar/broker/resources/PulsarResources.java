@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,51 +19,100 @@
 package org.apache.pulsar.broker.resources;
 
 import java.util.Optional;
-
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
+import lombok.Getter;
+import org.apache.pulsar.metadata.api.MetadataStore;
 import org.apache.pulsar.metadata.api.MetadataStoreConfig;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
 import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 
-import lombok.AccessLevel;
-import lombok.Getter;
-
-@Getter(AccessLevel.PUBLIC)
 public class PulsarResources {
 
     public static final int DEFAULT_OPERATION_TIMEOUT_SEC = 30;
-    private TenantResources tenantResources;
-    private ClusterResources clusterResources;
-    private ResourceGroupResources resourcegroupResources;
-    private NamespaceResources namespaceResources;
-    private DynamicConfigurationResources dynamicConfigResources;
-    private LocalPoliciesResources localPolicies;
-    private LoadManagerReportResources loadReportResources;
-    private Optional<MetadataStoreExtended> localMetadataStore;
-    private Optional<MetadataStoreExtended> configurationMetadataStore;
 
-    public PulsarResources(MetadataStoreExtended localMetadataStore, MetadataStoreExtended configurationMetadataStore) {
+    @Getter
+    private final TenantResources tenantResources;
+    @Getter
+    private final ClusterResources clusterResources;
+    @Getter
+    private final ResourceGroupResources resourcegroupResources;
+    @Getter
+    private final NamespaceResources namespaceResources;
+    @Getter
+    private final DynamicConfigurationResources dynamicConfigResources;
+    @Getter
+    private final LocalPoliciesResources localPolicies;
+    @Getter
+    private final LoadManagerReportResources loadReportResources;
+    @Getter
+    private final BookieResources bookieResources;
+    @Getter
+    private final TopicResources topicResources;
+    @Getter
+    private final LoadBalanceResources loadBalanceResources;
+    @Getter
+    private final Optional<MetadataStore> localMetadataStore;
+    @Getter
+    private final Optional<MetadataStore> configurationMetadataStore;
+
+    public PulsarResources(MetadataStore localMetadataStore, MetadataStore configurationMetadataStore) {
         this(localMetadataStore, configurationMetadataStore, DEFAULT_OPERATION_TIMEOUT_SEC);
     }
-    public PulsarResources(MetadataStoreExtended localMetadataStore, MetadataStoreExtended configurationMetadataStore,
-            int operationTimeoutSec) {
+
+    public PulsarResources(MetadataStore localMetadataStore, MetadataStore configurationMetadataStore,
+                           int operationTimeoutSec) {
+        this(localMetadataStore, configurationMetadataStore, operationTimeoutSec, ForkJoinPool.commonPool());
+    }
+
+    public PulsarResources(MetadataStore localMetadataStore, MetadataStore configurationMetadataStore,
+            int operationTimeoutSec, Executor executor) {
         if (configurationMetadataStore != null) {
             tenantResources = new TenantResources(configurationMetadataStore, operationTimeoutSec);
-            clusterResources = new ClusterResources(configurationMetadataStore, operationTimeoutSec);
-            namespaceResources = new NamespaceResources(configurationMetadataStore, operationTimeoutSec);
+            clusterResources = new ClusterResources(localMetadataStore, configurationMetadataStore,
+                    operationTimeoutSec);
+            namespaceResources = new NamespaceResources(configurationMetadataStore, operationTimeoutSec, executor);
             resourcegroupResources = new ResourceGroupResources(configurationMetadataStore, operationTimeoutSec);
+        } else {
+            tenantResources = null;
+            clusterResources = null;
+            namespaceResources  = null;
+            resourcegroupResources = null;
         }
+
         if (localMetadataStore != null) {
             dynamicConfigResources = new DynamicConfigurationResources(localMetadataStore, operationTimeoutSec);
             localPolicies = new LocalPoliciesResources(localMetadataStore, operationTimeoutSec);
             loadReportResources = new LoadManagerReportResources(localMetadataStore, operationTimeoutSec);
+            bookieResources = new BookieResources(localMetadataStore, operationTimeoutSec);
+            topicResources = new TopicResources(localMetadataStore);
+            loadBalanceResources = new LoadBalanceResources(localMetadataStore, operationTimeoutSec);
+        } else {
+            dynamicConfigResources = null;
+            localPolicies = null;
+            loadReportResources = null;
+            bookieResources = null;
+            topicResources = null;
+            loadBalanceResources = null;
         }
+
         this.localMetadataStore = Optional.ofNullable(localMetadataStore);
         this.configurationMetadataStore = Optional.ofNullable(configurationMetadataStore);
     }
 
-    public static MetadataStoreExtended createMetadataStore(String serverUrls, int sessionTimeoutMs)
+    public static MetadataStoreExtended createLocalMetadataStore(String serverUrls, int sessionTimeoutMs,
+                                                                 boolean allowReadOnlyOperations)
             throws MetadataStoreException {
         return MetadataStoreExtended.create(serverUrls, MetadataStoreConfig.builder()
-                .sessionTimeoutMillis(sessionTimeoutMs).allowReadOnlyOperations(false).build());
+                .sessionTimeoutMillis(sessionTimeoutMs).allowReadOnlyOperations(allowReadOnlyOperations)
+                .metadataStoreName(MetadataStoreConfig.METADATA_STORE).build());
+    }
+
+    public static MetadataStoreExtended createConfigMetadataStore(String serverUrls, int sessionTimeoutMs,
+                                                                  boolean allowReadOnlyOperations)
+            throws MetadataStoreException {
+        return MetadataStoreExtended.create(serverUrls, MetadataStoreConfig.builder()
+                .sessionTimeoutMillis(sessionTimeoutMs).allowReadOnlyOperations(allowReadOnlyOperations)
+                .metadataStoreName(MetadataStoreConfig.CONFIGURATION_METADATA_STORE).build());
     }
 }

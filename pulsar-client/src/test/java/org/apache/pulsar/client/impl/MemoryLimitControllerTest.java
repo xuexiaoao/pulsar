@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,12 +21,13 @@ package org.apache.pulsar.client.impl;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
-
+import static org.testng.Assert.fail;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -54,12 +55,47 @@ public class MemoryLimitControllerTest {
         }
 
         assertEquals(mlc.currentUsage(), 101);
+        assertEquals(mlc.currentUsagePercent(), 1.01);
         assertFalse(mlc.tryReserveMemory(1));
         mlc.releaseMemory(1);
         assertEquals(mlc.currentUsage(), 100);
+        assertEquals(mlc.currentUsagePercent(), 1.0);
 
         assertTrue(mlc.tryReserveMemory(1));
         assertEquals(mlc.currentUsage(), 101);
+
+        mlc.forceReserveMemory(99);
+        assertFalse(mlc.tryReserveMemory(1));
+        assertEquals(mlc.currentUsagePercent(), 2.0);
+
+        mlc.releaseMemory(50);
+        assertFalse(mlc.tryReserveMemory(1));
+        assertEquals(mlc.currentUsagePercent(), 1.5);
+
+        mlc.releaseMemory(50);
+        assertTrue(mlc.tryReserveMemory(1));
+        assertEquals(mlc.currentUsagePercent(), 1.01);
+    }
+
+    @Test
+    public void testTrigger() {
+        AtomicBoolean trigger = new AtomicBoolean(false);
+        MemoryLimitController mlc = new MemoryLimitController(100, 95, () -> trigger.set(true));
+
+        mlc.forceReserveMemory(94);
+        Assert.assertFalse(trigger.get());
+        mlc.forceReserveMemory(1);
+        Assert.assertTrue(trigger.get());
+
+        trigger.set(false);
+        for (int i = 0; i < 5; i++) {
+            mlc.forceReserveMemory(1);
+            Assert.assertFalse(trigger.get());
+        }
+
+        mlc.releaseMemory(50);
+        Assert.assertTrue(mlc.tryReserveMemory(50));
+        Assert.assertTrue(trigger.get());
     }
 
     @Test
@@ -161,5 +197,40 @@ public class MemoryLimitControllerTest {
         assertTrue(l2.await(1, TimeUnit.SECONDS));
         assertTrue(l3.await(1, TimeUnit.SECONDS));
         assertEquals(mlc.currentUsage(), 101);
+    }
+
+    @Test
+    public void testModifyMemoryFailedDueToNegativeParam() throws Exception {
+        MemoryLimitController mlc = new MemoryLimitController(100);
+
+        try {
+            mlc.tryReserveMemory(-1);
+            fail("The test should fail due to calling tryReserveMemory with a negative value.");
+        } catch (IllegalArgumentException e) {
+            // Expected ex.
+        }
+
+        try {
+            mlc.reserveMemory(-1);
+            fail("The test should fail due to calling reserveMemory with a negative value.");
+        } catch (IllegalArgumentException e) {
+            // Expected ex.
+        }
+
+        try {
+            mlc.forceReserveMemory(-1);
+            fail("The test should fail due to calling forceReserveMemory with a negative value.");
+        } catch (IllegalArgumentException e) {
+            // Expected ex.
+        }
+
+        try {
+            mlc.releaseMemory(-1);
+            fail("The test should fail due to calling releaseMemory with a negative value.");
+        } catch (IllegalArgumentException e) {
+            // Expected ex.
+        }
+
+        assertEquals(mlc.currentUsage(), 0);
     }
 }

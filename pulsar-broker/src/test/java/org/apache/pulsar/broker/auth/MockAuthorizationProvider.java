@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,24 +18,20 @@
  */
 package org.apache.pulsar.broker.auth;
 
-import java.io.IOException;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-
-import org.apache.pulsar.broker.authorization.AuthorizationProvider;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
-import org.apache.pulsar.broker.cache.ConfigurationCacheService;
-import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.broker.authorization.AuthorizationProvider;
 import org.apache.pulsar.common.naming.NamespaceName;
+import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.AuthAction;
+import org.apache.pulsar.common.policies.data.NamespaceOperation;
 import org.apache.pulsar.common.policies.data.PolicyName;
 import org.apache.pulsar.common.policies.data.PolicyOperation;
 import org.apache.pulsar.common.policies.data.TenantInfo;
-import org.apache.pulsar.common.policies.data.NamespaceOperation;
 import org.apache.pulsar.common.policies.data.TenantOperation;
 import org.apache.pulsar.common.policies.data.TopicOperation;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,18 +49,9 @@ public class MockAuthorizationProvider implements AuthorizationProvider {
     }
 
     @Override
-    public CompletableFuture<Boolean> isSuperUser(String role, ServiceConfiguration serviceConfiguration) {
-        return roleAuthorizedAsync(role);
-    }
-
-    @Override
     public CompletableFuture<Boolean> isTenantAdmin(String tenant, String role, TenantInfo tenantInfo,
                                                     AuthenticationDataSource authenticationData) {
         return roleAuthorizedAsync(role);
-    }
-
-    @Override
-    public void initialize(ServiceConfiguration conf, ConfigurationCacheService configCache) throws IOException {
     }
 
     @Override
@@ -130,19 +117,6 @@ public class MockAuthorizationProvider implements AuthorizationProvider {
     }
 
     @Override
-    public CompletableFuture<Boolean> allowTenantOperationAsync(String tenantName, String originalRole, String role,
-                                                                TenantOperation operation,
-                                                                AuthenticationDataSource authData) {
-        return roleAuthorizedAsync(role);
-    }
-
-    @Override
-    public Boolean allowTenantOperation(String tenantName, String originalRole, String role, TenantOperation operation,
-                                        AuthenticationDataSource authData) {
-        return roleAuthorized(role);
-    }
-
-    @Override
     public CompletableFuture<Boolean> allowTenantOperationAsync(String tenantName, String role,
                                                                 TenantOperation operation,
                                                                 AuthenticationDataSource authData) {
@@ -150,44 +124,11 @@ public class MockAuthorizationProvider implements AuthorizationProvider {
     }
 
     @Override
-    public Boolean allowTenantOperation(String tenantName, String role, TenantOperation operation,
-                                        AuthenticationDataSource authData) {
-        return roleAuthorized(role);
-    }
-
-    @Override
     public CompletableFuture<Boolean> allowNamespaceOperationAsync(NamespaceName namespaceName,
                                                                    String role,
                                                                    NamespaceOperation operation,
                                                                    AuthenticationDataSource authData) {
         return roleAuthorizedAsync(role);
-    }
-
-    @Override
-    public Boolean allowNamespaceOperation(NamespaceName namespaceName,
-                                           String role,
-                                           NamespaceOperation operation,
-                                           AuthenticationDataSource authData) {
-        return roleAuthorized(role);
-    }
-
-
-    @Override
-    public CompletableFuture<Boolean> allowNamespaceOperationAsync(NamespaceName namespaceName,
-                                                                   String originalRole,
-                                                                   String role,
-                                                                   NamespaceOperation operation,
-                                                                   AuthenticationDataSource authData) {
-        return roleAuthorizedAsync(role);
-    }
-
-    @Override
-    public Boolean allowNamespaceOperation(NamespaceName namespaceName,
-                                           String originalRole,
-                                           String role,
-                                           NamespaceOperation operation,
-                                           AuthenticationDataSource authData) {
-        return roleAuthorized(role);
     }
 
     @Override
@@ -200,66 +141,11 @@ public class MockAuthorizationProvider implements AuthorizationProvider {
     }
 
     @Override
-    public Boolean allowNamespacePolicyOperation(NamespaceName namespaceName,
-                                                 PolicyName policy,
-                                                 PolicyOperation operation,
-                                                 String role,
-                                                 AuthenticationDataSource authData) {
-        return roleAuthorized(role);
-    }
-
-    @Override
-    public CompletableFuture<Boolean> allowNamespacePolicyOperationAsync(NamespaceName namespaceName,
-                                                                         PolicyName policy,
-                                                                         PolicyOperation operation,
-                                                                         String originalRole,
-                                                                         String role,
-                                                                         AuthenticationDataSource authData) {
-        return roleAuthorizedAsync(role);
-    }
-
-    @Override
-    public Boolean allowNamespacePolicyOperation(NamespaceName namespaceName,
-                                                 PolicyName policy,
-                                                 PolicyOperation operation,
-                                                 String originalRole,
-                                                 String role,
-                                                 AuthenticationDataSource authData) {
-        return roleAuthorized(role);
-    }
-
-    @Override
     public CompletableFuture<Boolean> allowTopicOperationAsync(TopicName topic,
                                                                 String role,
                                                                 TopicOperation operation,
                                                                 AuthenticationDataSource authData) {
         return roleAuthorizedAsync(role);
-    }
-
-    @Override
-    public Boolean allowTopicOperation(TopicName topicName,
-                                        String role,
-                                        TopicOperation operation,
-                                        AuthenticationDataSource authData) {
-        return roleAuthorized(role);
-    }
-
-    @Override
-    public CompletableFuture<Boolean> allowTopicOperationAsync(TopicName topic,
-                                                                String originalRole,
-                                                                String role,
-                                                                TopicOperation operation,
-                                                                AuthenticationDataSource authData) {
-        return roleAuthorizedAsync(role);
-    }
-
-    @Override
-    public Boolean allowTopicOperation(TopicName topicName,
-                                       String originalRole,
-                                       String role,
-                                       TopicOperation operation,
-                                       AuthenticationDataSource authData) {
-        return roleAuthorized(role);
     }
 
     CompletableFuture<Boolean> roleAuthorizedAsync(String role) {

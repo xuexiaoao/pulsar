@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,12 +19,13 @@
 package org.apache.pulsar.common.policies.data;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.google.common.base.Objects;
-import org.apache.pulsar.common.util.ObjectMapperFactory;
-
+import com.fasterxml.jackson.databind.ObjectReader;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Objects;
+import org.apache.pulsar.common.util.ObjectMapperFactory;
 
 public class EnsemblePlacementPolicyConfig {
     public static final String ENSEMBLE_PLACEMENT_POLICY_CONFIG = "EnsemblePlacementPolicyConfig";
@@ -53,24 +54,24 @@ public class EnsemblePlacementPolicyConfig {
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(policyClass != null ? policyClass.getName() : "", properties);
+        return Objects.hash(policyClass != null ? policyClass.getName() : "", properties);
     }
 
     @Override
     public boolean equals(Object obj) {
         if (obj instanceof EnsemblePlacementPolicyConfig) {
             EnsemblePlacementPolicyConfig other = (EnsemblePlacementPolicyConfig) obj;
-            return Objects.equal(this.policyClass == null ? null : this.policyClass.getName(),
+            return Objects.equals(this.policyClass == null ? null : this.policyClass.getName(),
                 other.policyClass == null ? null : other.policyClass.getName())
-                && Objects.equal(this.properties, other.properties);
+                && Objects.equals(this.properties, other.properties);
         }
         return false;
     }
 
     public byte[] encode() throws ParseEnsemblePlacementPolicyConfigException {
         try {
-            return ObjectMapperFactory.getThreadLocal()
-                .writerWithDefaultPrettyPrinter()
+            return ObjectMapperFactory.getMapper()
+                .writer().withDefaultPrettyPrinter()
                 .writeValueAsString(this)
                 .getBytes(StandardCharsets.UTF_8);
         } catch (JsonProcessingException e) {
@@ -78,11 +79,13 @@ public class EnsemblePlacementPolicyConfig {
         }
     }
 
+    private static final ObjectReader ENSEMBLE_PLACEMENT_CONFIG_READER = ObjectMapperFactory.getMapper()
+            .reader().forType(EnsemblePlacementPolicyConfig.class);
+
     public static EnsemblePlacementPolicyConfig decode(byte[] data) throws ParseEnsemblePlacementPolicyConfigException {
         try {
-            return ObjectMapperFactory.getThreadLocal()
-                .readValue(new String(data, StandardCharsets.UTF_8), EnsemblePlacementPolicyConfig.class);
-        } catch (JsonProcessingException e) {
+            return ENSEMBLE_PLACEMENT_CONFIG_READER.readValue(data);
+        } catch (IOException e) {
             throw new ParseEnsemblePlacementPolicyConfigException("Failed to decode from json", e);
         }
     }
