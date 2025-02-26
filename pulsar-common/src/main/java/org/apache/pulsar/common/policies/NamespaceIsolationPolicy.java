@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.SortedSet;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.policies.data.BrokerStatus;
+import org.apache.pulsar.common.policies.data.NamespaceIsolationPolicyUnloadScope;
 
 /**
  * Namespace isolation policy.
@@ -44,20 +45,25 @@ public interface NamespaceIsolationPolicy {
     List<String> getSecondaryBrokers();
 
     /**
+     * Get the unload scope for the policy set call.
+     */
+    NamespaceIsolationPolicyUnloadScope getUnloadScope();
+
+    /**
      * Get the list of primary brokers for the namespace according to the policy.
      *
-     * @param availableBrokers
-     * @param namespace
-     * @return
+     * @param availableBrokers brokers identified by service URL.
+     * @param namespace the namespace
+     * @return a list brokers by service URL.
      */
     List<URL> findPrimaryBrokers(List<URL> availableBrokers, NamespaceName namespace);
 
     /**
      * Get the list of secondary brokers for the namespace according to the policy.
      *
-     * @param availableBrokers
-     * @param namespace
-     * @return
+     * @param availableBrokers brokers identified by service URL.
+     * @param namespace the namespace
+     * @return a list brokers by service URL.
      */
     List<URL> findSecondaryBrokers(List<URL> availableBrokers, NamespaceName namespace);
 

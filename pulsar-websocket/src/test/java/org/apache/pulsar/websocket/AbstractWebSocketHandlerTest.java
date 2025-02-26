@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,10 +18,12 @@
  */
 package org.apache.pulsar.websocket;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 import java.io.IOException;
 import java.net.URLEncoder;
@@ -31,10 +33,13 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import lombok.Cleanup;
+import com.google.common.base.Splitter;
 import lombok.Getter;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
 import org.apache.pulsar.client.api.CompressionType;
@@ -49,10 +54,14 @@ import org.apache.pulsar.client.impl.ProducerBuilderImpl;
 import org.apache.pulsar.client.impl.conf.ConsumerConfigurationData;
 import org.apache.pulsar.client.impl.conf.ProducerConfigurationData;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.util.Codec;
+import org.apache.pulsar.websocket.service.WebSocketProxyConfiguration;
+import org.eclipse.jetty.http.HttpStatus;
+import org.eclipse.jetty.websocket.api.RemoteEndpoint;
+import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.servlet.ServletUpgradeResponse;
 import org.mockito.Mock;
 import org.testng.annotations.AfterClass;
-import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
 public class AbstractWebSocketHandlerTest {
@@ -124,7 +133,7 @@ public class AbstractWebSocketHandlerTest {
         webSocketHandler = new WebSocketHandlerImpl(null, httpServletRequest, null);
         topicName = webSocketHandler.getTopic();
         assertEquals(topicName.toString(), "persistent://my-property/my-ns/" + consumerV2Topic);
-        String sub = ConsumerHandler.extractSubscription(httpServletRequest);
+        String sub = extractSubscription(httpServletRequest);
         assertEquals(sub, consumerV2Sub);
 
         when(httpServletRequest.getRequestURI()).thenReturn(readerV2
@@ -132,6 +141,27 @@ public class AbstractWebSocketHandlerTest {
         webSocketHandler = new WebSocketHandlerImpl(null, httpServletRequest, null);
         topicName = webSocketHandler.getTopic();
         assertEquals(topicName.toString(), "persistent://my-property/my-ns/" + readerV2Topic);
+    }
+
+    public String extractSubscription(HttpServletRequest request) {
+        String uri = request.getRequestURI();
+        List<String> parts = Splitter.on("/").splitToList(uri);
+
+        // v1 Format must be like :
+        // /ws/consumer/persistent/my-property/my-cluster/my-ns/my-topic/my-subscription
+
+        // v2 Format must be like :
+        // /ws/v2/consumer/persistent/my-property/my-ns/my-topic/my-subscription
+        checkArgument(parts.size() == 9, "Invalid topic name format");
+        checkArgument(parts.get(1).equals("ws"));
+
+        final boolean isV2Format = parts.get(2).equals("v2");
+        final int domainIndex = isV2Format ? 4 : 3;
+        checkArgument(parts.get(domainIndex).equals("persistent")
+                || parts.get(domainIndex).equals("non-persistent"));
+        checkArgument(parts.get(8).length() > 0, "Empty subscription name");
+
+        return Codec.decode(parts.get(8));
     }
 
     @Test
@@ -260,7 +290,7 @@ public class AbstractWebSocketHandlerTest {
             put("initialSequenceId", "1");
             put("hashingScheme", "Murmur3_32Hash");
             put("sendTimeoutMillis", "30001");
-            put("batchingEnabled", "false");
+            put("batchingEnabled", "true");
             put("batchingMaxMessages", "1001");
             put("maxPendingMessages", "1001");
             put("batchingMaxPublishDelay", "2");
@@ -288,14 +318,18 @@ public class AbstractWebSocketHandlerTest {
         assertEquals(conf.getInitialSequenceId().longValue(), 1L);
         assertEquals(conf.getHashingScheme(), HashingScheme.Murmur3_32Hash);
         assertEquals(conf.getSendTimeoutMs(), 30001);
-        assertFalse(conf.isBatchingEnabled() );
+        assertTrue(conf.isBatchingEnabled());
         assertEquals(conf.getBatchingMaxMessages(), 1001);
         assertEquals(conf.getMaxPendingMessages(), 1001);
+        assertEquals(conf.getBatchingMaxPublishDelayMicros(), 2000);
         assertEquals(conf.getMessageRoutingMode(), MessageRoutingMode.RoundRobinPartition);
         assertEquals(conf.getCompressionType(), CompressionType.LZ4);
 
         producerHandler.clearQueryParams();
         conf = producerHandler.getConf();
+        // By default batching is disabled, which is different with ProducerBuilder
+        assertFalse(conf.isBatchingEnabled());
+
         // The default message routing mode is SinglePartition, which is different with ProducerBuilder
         assertEquals(conf.getMessageRoutingMode(), MessageRoutingMode.SinglePartition);
 
@@ -369,11 +403,64 @@ public class AbstractWebSocketHandlerTest {
         consumerHandler.clearQueryParams();
         consumerHandler.putQueryParam("receiverQueueSize", "1001");
         consumerHandler.putQueryParam("deadLetterTopic", "dead-letter-topic");
+        consumerHandler.putQueryParam("maxRedeliverCount", "3");
 
         conf = consumerHandler.getConf();
         // receive queue size is the minimum value of default value (1000) and user defined value(1001)
         assertEquals(conf.getReceiverQueueSize(), 1000);
         assertEquals(conf.getDeadLetterPolicy().getDeadLetterTopic(), "dead-letter-topic");
-        assertEquals(conf.getDeadLetterPolicy().getMaxRedeliverCount(), 0);
+        assertEquals(conf.getDeadLetterPolicy().getMaxRedeliverCount(), 3);
+    }
+
+    @Test
+    public void testPingFuture() throws IOException {
+        WebSocketProxyConfiguration webSocketProxyConfiguration = new WebSocketProxyConfiguration();
+        webSocketProxyConfiguration.setWebSocketPingDurationSeconds(5);
+
+        @Cleanup
+        WebSocketService webSocketService = new WebSocketService(webSocketProxyConfiguration);
+
+        HttpServletRequest httpServletRequest = mock(HttpServletRequest.class);
+        String consumerV2 = "/ws/v2/consumer/persistent/my-property/my-ns/my-topic/my-subscription";
+        Map<String, String[]> queryParams = new HashMap<String, String>(){{
+            put("ackTimeoutMillis", "1001");
+            put("subscriptionType", "Key_Shared");
+            put("subscriptionMode", "NonDurable");
+            put("receiverQueueSize", "999");
+            put("consumerName", "my-consumer");
+            put("priorityLevel", "1");
+            put("maxRedeliverCount", "5");
+        }}.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, entry -> new String[]{ entry.getValue() }));
+
+        when(httpServletRequest.getRequestURI()).thenReturn(consumerV2);
+        when(httpServletRequest.getParameterMap()).thenReturn(queryParams);
+
+        MockedServletUpgradeResponse response = new MockedServletUpgradeResponse(null);
+        AbstractWebSocketHandler webSocketHandler = new WebSocketHandlerImpl(webSocketService, httpServletRequest, response);
+
+        Session session = mock(Session.class);
+        RemoteEndpoint remoteEndpoint = mock(RemoteEndpoint.class);
+        when(session.getRemote()).thenReturn(remoteEndpoint);
+
+        // onWebSocketClose
+        webSocketHandler.onWebSocketConnect(session);
+
+        ScheduledFuture<?> pingFuture = webSocketHandler.getPingFuture();
+        assertNotNull(pingFuture);
+        assertFalse(pingFuture.isDone());
+
+        webSocketHandler.onWebSocketClose(HttpStatus.INTERNAL_SERVER_ERROR_500, "INTERNAL_SERVER_ERROR_500");
+        assertTrue(pingFuture.isDone());
+
+
+        // onWebSocketError
+        webSocketHandler.onWebSocketConnect(session);
+
+        pingFuture = webSocketHandler.getPingFuture();
+        assertNotNull(pingFuture);
+        assertFalse(pingFuture.isDone());
+
+        webSocketHandler.onWebSocketError(new RuntimeException("INTERNAL_SERVER_ERROR_500"));
+        assertTrue(pingFuture.isDone());
     }
 }

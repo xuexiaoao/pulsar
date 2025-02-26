@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,8 @@
  */
 package org.apache.pulsar.client.api;
 
+import java.io.Serializable;
+import java.util.Objects;
 import org.apache.pulsar.common.classification.InterfaceAudience;
 import org.apache.pulsar.common.classification.InterfaceStability;
 
@@ -26,7 +28,8 @@ import org.apache.pulsar.common.classification.InterfaceStability;
  */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
-public class Range {
+public class Range implements Comparable<Range>, Serializable {
+    private static final long serialVersionUID = 1L;
 
     private final int start;
     private final int end;
@@ -63,7 +66,59 @@ public class Range {
     }
 
     @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        Range range = (Range) o;
+        return start == range.start && end == range.end;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(start, end);
+    }
+
+    @Override
     public String toString() {
         return "[" + start + ", " + end + "]";
+    }
+
+    @Override
+    public int compareTo(Range o) {
+        int result = Integer.compare(start, o.start);
+        if (result == 0) {
+            result = Integer.compare(end, o.end);
+        }
+        return result;
+    }
+
+    /**
+     * Check if the value is in the range.
+     * @param value
+     * @return true if the value is in the range.
+     */
+    public boolean contains(int value) {
+        return value >= start && value <= end;
+    }
+
+    /**
+     * Check if the range is fully contained in the other range.
+     * @param otherRange
+     * @return true if the range is fully contained in the other range.
+     */
+    public boolean contains(Range otherRange) {
+        return start <= otherRange.start && end >= otherRange.end;
+    }
+
+    /**
+     * Get the size of the range.
+     * @return the size of the range.
+     */
+    public int size() {
+        return end - start + 1;
     }
 }

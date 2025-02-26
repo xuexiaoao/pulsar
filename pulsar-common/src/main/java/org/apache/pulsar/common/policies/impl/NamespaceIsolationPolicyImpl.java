@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,10 +18,10 @@
  */
 package org.apache.pulsar.common.policies.impl;
 
-import com.google.common.base.Objects;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import org.apache.pulsar.common.naming.NamespaceName;
@@ -29,7 +29,7 @@ import org.apache.pulsar.common.policies.AutoFailoverPolicy;
 import org.apache.pulsar.common.policies.NamespaceIsolationPolicy;
 import org.apache.pulsar.common.policies.data.BrokerStatus;
 import org.apache.pulsar.common.policies.data.NamespaceIsolationData;
-import org.apache.pulsar.common.policies.data.NamespaceIsolationDataImpl;
+import org.apache.pulsar.common.policies.data.NamespaceIsolationPolicyUnloadScope;
 
 /**
  * Implementation of the namespace isolation policy.
@@ -40,6 +40,7 @@ public class NamespaceIsolationPolicyImpl implements NamespaceIsolationPolicy {
     private List<String> primary;
     private List<String> secondary;
     private AutoFailoverPolicy autoFailoverPolicy;
+    private NamespaceIsolationPolicyUnloadScope unloadScope;
 
     private boolean matchNamespaces(String fqnn) {
         for (String nsRegex : namespaces) {
@@ -65,6 +66,7 @@ public class NamespaceIsolationPolicyImpl implements NamespaceIsolationPolicy {
         this.primary = policyData.getPrimary();
         this.secondary = policyData.getSecondary();
         this.autoFailoverPolicy = AutoFailoverPolicyFactory.create(policyData.getAutoFailoverPolicy());
+        this.unloadScope = policyData.getUnloadScope();
     }
 
     @Override
@@ -75,6 +77,11 @@ public class NamespaceIsolationPolicyImpl implements NamespaceIsolationPolicy {
     @Override
     public List<String> getSecondaryBrokers() {
         return this.secondary;
+    }
+
+    @Override
+    public NamespaceIsolationPolicyUnloadScope getUnloadScope() {
+        return this.unloadScope;
     }
 
     @Override
@@ -122,7 +129,7 @@ public class NamespaceIsolationPolicyImpl implements NamespaceIsolationPolicy {
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(namespaces, primary, secondary,
+        return Objects.hash(namespaces, primary, secondary,
             autoFailoverPolicy);
     }
 
@@ -130,9 +137,9 @@ public class NamespaceIsolationPolicyImpl implements NamespaceIsolationPolicy {
     public boolean equals(Object obj) {
         if (obj instanceof NamespaceIsolationPolicyImpl) {
             NamespaceIsolationPolicyImpl other = (NamespaceIsolationPolicyImpl) obj;
-            return Objects.equal(this.namespaces, other.namespaces) && Objects.equal(this.primary, other.primary)
-                    && Objects.equal(this.secondary, other.secondary)
-                    && Objects.equal(this.autoFailoverPolicy, other.autoFailoverPolicy);
+            return Objects.equals(this.namespaces, other.namespaces) && Objects.equals(this.primary, other.primary)
+                    && Objects.equals(this.secondary, other.secondary)
+                    && Objects.equals(this.autoFailoverPolicy, other.autoFailoverPolicy);
         }
 
         return false;

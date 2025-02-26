@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,19 +18,17 @@
  */
 package org.apache.pulsar.broker.loadbalance.impl;
 
-import static org.apache.pulsar.broker.loadbalance.impl.LoadManagerShared.LOAD_REPORT_UPDATE_MIMIMUM_INTERVAL;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import com.google.common.collect.TreeMultimap;
-import io.netty.util.concurrent.DefaultThreadFactory;
-import java.io.IOException;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -40,12 +38,18 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.SystemUtils;
 import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.PulsarService;
@@ -54,12 +58,12 @@ import org.apache.pulsar.broker.loadbalance.LoadManager;
 import org.apache.pulsar.broker.loadbalance.PlacementStrategy;
 import org.apache.pulsar.broker.loadbalance.ResourceUnit;
 import org.apache.pulsar.broker.loadbalance.impl.LoadManagerShared.BrokerTopicLoadingPredicate;
+import org.apache.pulsar.client.util.ExecutorProvider;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.ServiceUnitId;
 import org.apache.pulsar.common.policies.data.ResourceQuota;
 import org.apache.pulsar.common.stats.Metrics;
-import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
-import org.apache.pulsar.common.util.collections.ConcurrentOpenHashSet;
+import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.metadata.api.MetadataCache;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
 import org.apache.pulsar.metadata.api.Notification;
@@ -68,6 +72,7 @@ import org.apache.pulsar.metadata.api.coordination.ResourceLock;
 import org.apache.pulsar.policies.data.loadbalancer.LoadReport;
 import org.apache.pulsar.policies.data.loadbalancer.NamespaceBundleStats;
 import org.apache.pulsar.policies.data.loadbalancer.ResourceUnitRanking;
+import org.apache.pulsar.policies.data.loadbalancer.ResourceUsage;
 import org.apache.pulsar.policies.data.loadbalancer.SystemResourceUsage;
 import org.apache.pulsar.policies.data.loadbalancer.SystemResourceUsage.ResourceType;
 import org.slf4j.Logger;
@@ -102,10 +107,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     private final Set<String> bundleGainsCache;
     private final Set<String> bundleLossesCache;
 
-    // Map from brokers to namespaces to the bundle ranges in that namespace assigned to that broker.
-    // Used to distribute bundles within a namespace evely across brokers.
-    private final ConcurrentOpenHashMap<String, ConcurrentOpenHashMap<String,
-            ConcurrentOpenHashSet<String>>> brokerToNamespaceToBundleRange;
+    private final BundleRangeCache brokerToNamespaceToBundleRange = new BundleRangeCache();
 
     // CPU usage per msg/sec
     private double realtimeCpuLoadFactor = 0.025;
@@ -181,14 +183,18 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     // check if given broker can load persistent/non-persistent topic
     private final BrokerTopicLoadingPredicate brokerTopicLoadingPredicate;
 
+    private volatile Future<?> updateRankingHandle;
+
+    private Map<String, String> bundleBrokerAffinityMap;
+
     // Perform initializations which may be done without a PulsarService.
     public SimpleLoadManagerImpl() {
         scheduler = Executors.newSingleThreadScheduledExecutor(
-                new DefaultThreadFactory("pulsar-simple-load-manager"));
+                new ExecutorProvider.ExtendedThreadFactory("pulsar-simple-load-manager"));
         this.sortedRankings.set(new TreeMap<>());
         this.currentLoadReports = new HashMap<>();
         this.resourceUnitRankings = new HashMap<>();
-        this.loadBalancingMetrics.set(Lists.newArrayList());
+        this.loadBalancingMetrics.set(new ArrayList<>());
         this.realtimeResourceQuotas.set(new HashMap<>());
         this.realtimeAvgResourceQuota = new ResourceQuota();
         placementStrategy = new WRRPlacementStrategy();
@@ -196,18 +202,17 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
         bundleLossesCache = new HashSet<>();
         brokerCandidateCache = new HashSet<>();
         availableBrokersCache = new HashSet<>();
-        brokerToNamespaceToBundleRange = new ConcurrentOpenHashMap<>();
         this.brokerTopicLoadingPredicate = new BrokerTopicLoadingPredicate() {
             @Override
-            public boolean isEnablePersistentTopics(String brokerUrl) {
-                ResourceUnit ru = new SimpleResourceUnit(brokerUrl, new PulsarResourceDescription());
+            public boolean isEnablePersistentTopics(String brokerId) {
+                ResourceUnit ru = new SimpleResourceUnit(brokerId, new PulsarResourceDescription());
                 LoadReport loadReport = currentLoadReports.get(ru);
                 return loadReport != null && loadReport.isPersistentTopicsEnabled();
             }
 
             @Override
-            public boolean isEnableNonPersistentTopics(String brokerUrl) {
-                ResourceUnit ru = new SimpleResourceUnit(brokerUrl, new PulsarResourceDescription());
+            public boolean isEnableNonPersistentTopics(String brokerId) {
+                ResourceUnit ru = new SimpleResourceUnit(brokerId, new PulsarResourceDescription());
                 LoadReport loadReport = currentLoadReports.get(ru);
                 return loadReport != null && loadReport.isNonPersistentTopicsEnabled();
             }
@@ -222,8 +227,8 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             brokerHostUsage = new GenericBrokerHostUsageImpl(pulsar);
         }
         this.policies = new SimpleResourceAllocationPolicies(pulsar);
-        lastLoadReport = new LoadReport(pulsar.getSafeWebServiceAddress(), pulsar.getWebServiceAddressTls(),
-                pulsar.getSafeBrokerServiceUrl(), pulsar.getBrokerServiceUrlTls());
+        lastLoadReport = new LoadReport(pulsar.getWebServiceAddress(), pulsar.getWebServiceAddressTls(),
+                pulsar.getBrokerServiceUrl(), pulsar.getBrokerServiceUrlTls());
         lastLoadReport.setProtocols(pulsar.getProtocolDataToAdvertise());
         lastLoadReport.setPersistentTopicsEnabled(pulsar.getConfiguration().isEnablePersistentTopics());
         lastLoadReport.setNonPersistentTopicsEnabled(pulsar.getConfiguration().isEnableNonPersistentTopics());
@@ -243,6 +248,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                     }
                 });
         this.pulsar = pulsar;
+        this.bundleBrokerAffinityMap = new ConcurrentHashMap<>();
     }
 
     public SimpleLoadManagerImpl(PulsarService pulsar) {
@@ -253,8 +259,8 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     @Override
     public void start() throws PulsarServerException {
         // Register the brokers in metadata store
-        String lookupServiceAddress = getBrokerAddress();
-        String brokerLockPath = LOADBALANCE_BROKERS_ROOT + "/" + lookupServiceAddress;
+        String brokerId = pulsar.getBrokerId();
+        String brokerLockPath = LOADBALANCE_BROKERS_ROOT + "/" + brokerId;
 
         try {
             LoadReport loadReport = null;
@@ -272,7 +278,8 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             log.info("Created broker ephemeral node on {}", brokerLockPath);
 
             // load default resource quota
-            this.realtimeAvgResourceQuota = pulsar.getLocalZkCacheService().getResourceQuotaCache().getDefaultQuota();
+            this.realtimeAvgResourceQuota = pulsar.getBrokerService().getBundlesQuotas()
+                    .getDefaultResourceQuota().join();
             this.lastResourceQuotaUpdateTimestamp = System.currentTimeMillis();
             this.realtimeCpuLoadFactor = getDynamicConfigurationDouble(
                     LOADBALANCER_DYNAMIC_SETTING_LOAD_FACTOR_CPU_ZPATH, SETTING_NAME_LOAD_FACTOR_CPU,
@@ -298,13 +305,28 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
         return new HashSet<>(loadReports.listLocks(LOADBALANCE_BROKERS_ROOT).join());
     }
 
-    private void setDynamicConfigurationToStore(String path, Map<String, String> settings) throws IOException {
+    @Override
+    public CompletableFuture<Set<String>> getAvailableBrokersAsync() {
+        CompletableFuture<Set<String>> getAvailableBrokersAsync = new CompletableFuture<>();
+        loadReports.listLocks(LoadManager.LOADBALANCE_BROKERS_ROOT)
+                .whenComplete((listLocks, ex) -> {
+                    if (ex != null){
+                        Throwable realCause = FutureUtil.unwrapCompletionException(ex);
+                        log.warn("Error when trying to get active brokers", realCause);
+                        getAvailableBrokersAsync.completeExceptionally(realCause);
+                    } else {
+                        getAvailableBrokersAsync.complete(Sets.newHashSet(listLocks));
+                    }
+                });
+        return getAvailableBrokersAsync;
+    }
+
+    private void setDynamicConfigurationToStore(String path, Map<String, String> settings) {
         try {
             dynamicConfigurationCache.readModifyUpdateOrCreate(path, __ -> settings).join();
         } catch (CompletionException e) {
             log.warn("Got exception when writing to metadata store [{}]:", path, MetadataStoreException.unwrap(e));
         }
-
     }
 
     private String getDynamicConfigurationFromStore(String path, String settingName, String defaultValue) {
@@ -317,29 +339,23 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     }
 
     private double getDynamicConfigurationDouble(String path, String settingName, double defaultValue) {
-        double result = defaultValue;
         try {
-            String setting = this.getDynamicConfigurationFromStore(path, settingName, null);
-            if (setting != null) {
-                result = Double.parseDouble(setting);
-            }
+            return Double.parseDouble(getDynamicConfigurationFromStore(path, settingName,
+                    String.valueOf(defaultValue)));
         } catch (Exception e) {
             log.warn("Got exception when parsing configuration from path [{}]:", path, e);
         }
-        return result;
+        return defaultValue;
     }
 
     private boolean getDynamicConfigurationBoolean(String path, String settingName, boolean defaultValue) {
-        boolean result = defaultValue;
         try {
-            String setting = this.getDynamicConfigurationFromStore(path, settingName, null);
-            if (setting != null) {
-                result = Boolean.parseBoolean(setting);
-            }
+            return Boolean.parseBoolean(getDynamicConfigurationFromStore(path, settingName,
+                    String.valueOf(defaultValue)));
         } catch (Exception e) {
             log.warn("Got exception when parsing configuration from path [{}]:", path, e);
         }
-        return result;
+        return defaultValue;
     }
 
     private String getLoadBalancerPlacementStrategy() {
@@ -413,7 +429,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     private ResourceQuota getResourceQuota(String bundle) {
         Map<String, ResourceQuota> quotas = this.realtimeResourceQuotas.get();
         if (!quotas.containsKey(bundle)) {
-            ResourceQuota quota = pulsar.getLocalZkCacheService().getResourceQuotaCache().getQuota(bundle);
+            ResourceQuota quota = pulsar.getBrokerService().getBundlesQuotas().getResourceQuota(bundle).join();
             quotas.put(bundle, quota);
             return quota;
         } else {
@@ -579,9 +595,9 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                     newQuota.getBandwidthIn(), newQuota.getBandwidthOut(), newQuota.getMemory()));
 
             if (bundle == null) {
-                pulsar.getLocalZkCacheService().getResourceQuotaCache().setDefaultQuota(newQuota);
+                pulsar.getBrokerService().getBundlesQuotas().setDefaultResourceQuota(newQuota).join();
             } else {
-                pulsar.getLocalZkCacheService().getResourceQuotaCache().setQuota(bundle, newQuota);
+                pulsar.getBrokerService().getBundlesQuotas().setResourceQuota(bundle, newQuota).join();
             }
         }
     }
@@ -601,14 +617,14 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                 }});
 
         // write default quota
-        ResourceQuota defaultQuota = pulsar.getLocalZkCacheService().getResourceQuotaCache().getDefaultQuota();
+        ResourceQuota defaultQuota = pulsar.getBrokerService().getBundlesQuotas().getDefaultResourceQuota().join();
         this.compareAndWriteQuota(null, defaultQuota, this.realtimeAvgResourceQuota);
 
         // write each bundle's quota
         Map<String, ResourceQuota> quotas = this.realtimeResourceQuotas.get();
         for (Map.Entry<String, ResourceQuota> entry : quotas.entrySet()) {
             String bundle = entry.getKey();
-            ResourceQuota oldQuota = pulsar.getLocalZkCacheService().getResourceQuotaCache().getQuota(bundle);
+            ResourceQuota oldQuota = pulsar.getBrokerService().getBundlesQuotas().getResourceQuota(bundle).join();
             this.compareAndWriteQuota(bundle, oldQuota, entry.getValue());
         }
     }
@@ -630,13 +646,14 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
      */
     private synchronized void doLoadRanking() {
         ResourceUnitRanking.setCpuUsageByMsgRate(this.realtimeCpuLoadFactor);
-        String hostname = pulsar.getAdvertisedAddress();
         String strategy = this.getLoadBalancerPlacementStrategy();
         log.info("doLoadRanking - load balancing strategy: {}", strategy);
         if (!currentLoadReports.isEmpty()) {
 
-            Map<Long, Set<ResourceUnit>> newSortedRankings = Maps.newTreeMap();
+            Map<Long, Set<ResourceUnit>> newSortedRankings = new TreeMap<>();
             Map<ResourceUnit, ResourceUnitRanking> newResourceUnitRankings = new HashMap<>();
+            ResourceQuota defaultResourceQuota =
+                    pulsar.getBrokerService().getBundlesQuotas().getDefaultResourceQuota().join();
 
             for (Map.Entry<ResourceUnit, LoadReport> entry : currentLoadReports.entrySet()) {
                 ResourceUnit resourceUnit = entry.getKey();
@@ -659,8 +676,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
 
                 // generated sorted ranking
                 double loadPercentage = ranking.getEstimatedLoadPercentage();
-                long maxCapacity = ranking
-                        .estimateMaxCapacity(pulsar.getLocalZkCacheService().getResourceQuotaCache().getDefaultQuota());
+                long maxCapacity = ranking.estimateMaxCapacity(defaultResourceQuota);
                 long finalRank = 0;
                 if (strategy.equals(LOADBALANCER_STRATEGY_LLS)) {
                     finalRank = (long) loadPercentage;
@@ -671,17 +687,15 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                     finalRank = (long) (maxCapacity * idleRatio * idleRatio);
                 }
 
-                if (!newSortedRankings.containsKey(finalRank)) {
-                    newSortedRankings.put(finalRank, new HashSet<ResourceUnit>());
-                }
-                newSortedRankings.get(finalRank).add(entry.getKey());
+                newSortedRankings.computeIfAbsent(finalRank, k -> new HashSet<>())
+                        .add(entry.getKey());
                 if (log.isDebugEnabled()) {
                     log.debug("Added Resource Unit [{}] with Rank [{}]", entry.getKey().getResourceId(), finalRank);
                 }
 
                 // update metrics
-                if (resourceUnit.getResourceId().contains(hostname)) {
-                    updateLoadBalancingMetrics(hostname, finalRank, ranking);
+                if (resourceUnit.getResourceId().equals(pulsar.getBrokerId())) {
+                    updateLoadBalancingMetrics(pulsar.getAdvertisedAddress(), finalRank, ranking);
                 }
             }
             updateBrokerToNamespaceToBundle();
@@ -689,7 +703,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             this.resourceUnitRankings = newResourceUnitRankings;
         } else {
             log.info("Leader broker[{}] No ResourceUnits to rank this run, Using Old Ranking",
-                    pulsar.getSafeWebServiceAddress());
+                    pulsar.getBrokerId());
         }
     }
 
@@ -699,7 +713,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     }
 
     private void updateLoadBalancingMetrics(String hostname, long finalRank, ResourceUnitRanking ranking) {
-        List<Metrics> metrics = Lists.newArrayList();
+        List<Metrics> metrics = new ArrayList<>();
         Map<String, String> dimensions = new HashMap<>();
 
         dimensions.put("broker", hostname);
@@ -719,15 +733,15 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
      * another idle broker in; 2) Even distribution: once all brokers' load are above optimum level, maintain all
      * brokers to have even load; 3) Set the underload threshold to small value (like 1) for pure even distribution, and
      * high value (like 80) for pure optimum distribution;
-     *
+     * <p>
      * Strategy to select broker: 1) The first choice is the least loaded broker which is underload but not idle; 2) The
-     * second choice is idle broker (if there is any); 3) Othewise simply select the least loaded broker if it is NOT
+     * second choice is idle broker (if there is any); 3) Otherwise simply select the least loaded broker if it is NOT
      * overloaded; 4) If all brokers are overloaded, select the broker with maximum available capacity (considering
      * brokers could have different hardware configuration, this usually means to select the broker with more hardware
      * resource);
-     *
+     * <p>
      * Broker's load level: 1) Load ranking (triggered by LoadReport update) estimate the load level according to the
-     * resourse usage and namespace bundles already loaded by each broker; 2) When leader broker decide the owner for a
+     * resource usage and namespace bundles already loaded by each broker; 2) When leader broker decide the owner for a
      * new namespace bundle, it may take time for the real owner to actually load the bundle and refresh LoadReport,
      * leader broker will store the bundle in a list called preAllocatedBundles, and the quota of all
      * preAllocatedBundles in preAllocatedQuotas, and re-estimate the broker's load level by putting the
@@ -738,7 +752,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             ServiceUnitId serviceUnit) {
         long underloadThreshold = this.getLoadBalancerBrokerUnderloadedThresholdPercentage();
         long overloadThreshold = this.getLoadBalancerBrokerOverloadedThresholdPercentage();
-        ResourceQuota defaultQuota = pulsar.getLocalZkCacheService().getResourceQuotaCache().getDefaultQuota();
+        ResourceQuota defaultQuota = pulsar.getBrokerService().getBundlesQuotas().getDefaultResourceQuota().join();
 
         double minLoadPercentage = 101.0;
         long maxAvailability = -1;
@@ -832,10 +846,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                 ResourceQuota quota = this.getResourceQuota(serviceUnitId);
                 // Add preallocated bundle range so incoming bundles from the same namespace are not assigned to the
                 // same broker.
-                brokerToNamespaceToBundleRange
-                        .computeIfAbsent(selectedRU.getResourceId().replace("http://", ""),
-                                k -> new ConcurrentOpenHashMap<>())
-                        .computeIfAbsent(namespaceName, k -> new ConcurrentOpenHashSet<>()).add(bundleRange);
+                brokerToNamespaceToBundleRange.add(selectedRU.getResourceId(), namespaceName, bundleRange);
                 ranking.addPreAllocatedServiceUnit(serviceUnitId, quota);
                 resourceUnitRankings.put(selectedRU, ranking);
             }
@@ -850,7 +861,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             availableBrokersCache.clear();
             for (final Set<ResourceUnit> resourceUnits : availableBrokers.values()) {
                 for (final ResourceUnit resourceUnit : resourceUnits) {
-                    availableBrokersCache.add(resourceUnit.getResourceId().replace("http://", ""));
+                    availableBrokersCache.add(resourceUnit.getResourceId());
                 }
             }
             brokerCandidateCache.clear();
@@ -873,7 +884,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                 final Long rank = entry.getKey();
                 final Set<ResourceUnit> resourceUnits = entry.getValue();
                 for (final ResourceUnit resourceUnit : resourceUnits) {
-                    if (brokerCandidateCache.contains(resourceUnit.getResourceId().replace("http://", ""))) {
+                    if (brokerCandidateCache.contains(resourceUnit.getResourceId())) {
                         result.put(rank, resourceUnit);
                     }
                 }
@@ -900,11 +911,10 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             List<String> activeBrokers = loadReports.listLocks(LOADBALANCE_BROKERS_ROOT).join();
             Collections.shuffle(activeBrokers);
 
-            availableBrokers = Maps.newTreeMap();
+            availableBrokers = new HashMap<>();
             for (String broker : activeBrokers) {
-                ResourceUnit resourceUnit = new SimpleResourceUnit(String.format("http://%s", broker),
-                        new PulsarResourceDescription());
-                availableBrokers.computeIfAbsent(0L, key -> Sets.newTreeSet()).add(resourceUnit);
+                ResourceUnit resourceUnit = new SimpleResourceUnit(broker, new PulsarResourceDescription());
+                availableBrokers.computeIfAbsent(0L, key -> new TreeSet<>()).add(resourceUnit);
             }
             log.info("Choosing at random from broker list: [{}]", availableBrokers.values());
         }
@@ -930,7 +940,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             Iterator<Map.Entry<Long, ResourceUnit>> candidateIterator = finalCandidates.entries().iterator();
             while (candidateIterator.hasNext()) {
                 Map.Entry<Long, ResourceUnit> candidate = candidateIterator.next();
-                String candidateBrokerName = candidate.getValue().getResourceId().replace("http://", "");
+                String candidateBrokerName = candidate.getValue().getResourceId();
                 if (!activeBrokers.contains(candidateBrokerName)) {
                     candidateIterator.remove(); // Current candidate points to an inactive broker, so remove it
                 }
@@ -962,8 +972,13 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                 log.debug("Received updated load report from broker node - [{}], scheduling re-ranking of brokers.",
                         n.getPath());
             }
-            scheduler.submit(this::updateRanking);
+            updateRankingHandle = scheduler.submit(this::updateRanking);
         }
+    }
+
+    @VisibleForTesting
+    public Future<?> getUpdateRankingHandle(){
+        return updateRankingHandle;
     }
 
     private void updateRanking() {
@@ -974,8 +989,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                     try {
                         String key = String.format("%s/%s", LOADBALANCE_BROKERS_ROOT, broker);
                         LoadReport lr = loadReports.readLock(key).join().get();
-                        ResourceUnit ru = new SimpleResourceUnit(String.format("http://%s", lr.getName()),
-                                fromLoadReport(lr));
+                        ResourceUnit ru = new SimpleResourceUnit(lr.getName(), fromLoadReport(lr));
                         this.currentLoadReports.put(ru, lr);
                     } catch (Exception e) {
                         log.warn("Error reading load report from Cache for broker - [{}], [{}]", broker, e);
@@ -1022,10 +1036,11 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
         }
     }
 
-    public SystemResourceUsage getSystemResourceUsage() throws IOException {
+    public SystemResourceUsage getSystemResourceUsage() {
         SystemResourceUsage systemResourceUsage = LoadManagerShared.getSystemResourceUsage(brokerHostUsage);
         long memoryUsageInMBytes = getAverageJvmHeapUsageMBytes();
-        systemResourceUsage.memory.usage = (double) memoryUsageInMBytes;
+        systemResourceUsage
+                .setMemory(new ResourceUsage((double) memoryUsageInMBytes, systemResourceUsage.memory.limit));
         return systemResourceUsage;
     }
 
@@ -1040,13 +1055,13 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     private LoadReport generateLoadReportForcefully() throws Exception {
         synchronized (bundleGainsCache) {
             try {
-                LoadReport loadReport = new LoadReport(pulsar.getSafeWebServiceAddress(),
-                        pulsar.getWebServiceAddressTls(), pulsar.getSafeBrokerServiceUrl(),
+                LoadReport loadReport = new LoadReport(pulsar.getWebServiceAddress(),
+                        pulsar.getWebServiceAddressTls(), pulsar.getBrokerServiceUrl(),
                         pulsar.getBrokerServiceUrlTls());
                 loadReport.setProtocols(pulsar.getProtocolDataToAdvertise());
                 loadReport.setNonPersistentTopicsEnabled(pulsar.getConfiguration().isEnableNonPersistentTopics());
                 loadReport.setPersistentTopicsEnabled(pulsar.getConfiguration().isEnablePersistentTopics());
-                loadReport.setName(getBrokerAddress());
+                loadReport.setName(pulsar.getBrokerId());
                 loadReport.setBrokerVersionString(pulsar.getBrokerVersion());
 
                 SystemResourceUsage systemResourceUsage = this.getSystemResourceUsage();
@@ -1058,6 +1073,8 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                 loadReport.setSystemResourceUsage(systemResourceUsage);
                 loadReport.setBundleStats(pulsar.getBrokerService().getBundleStats());
                 loadReport.setTimestamp(System.currentTimeMillis());
+                loadReport.setLoadManagerClassName(pulsar.getConfig().getLoadManagerClassName());
+                loadReport.setStartTimestamp(System.currentTimeMillis());
 
                 final Set<String> oldBundles = lastLoadReport.getBundles();
                 final Set<String> newBundles = loadReport.getBundles();
@@ -1087,8 +1104,8 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
                 loadReport.setAllocatedMsgRateIn(allocatedQuota.getMsgRateIn());
                 loadReport.setAllocatedMsgRateOut(allocatedQuota.getMsgRateOut());
 
-                final ResourceUnit resourceUnit = new SimpleResourceUnit(
-                        String.format("http://%s", loadReport.getName()), fromLoadReport(loadReport));
+                final ResourceUnit resourceUnit =
+                        new SimpleResourceUnit(loadReport.getName(), fromLoadReport(loadReport));
                 Set<String> preAllocatedBundles;
                 if (resourceUnitRankings.containsKey(resourceUnit)) {
                     preAllocatedBundles = resourceUnitRankings.get(resourceUnit).getPreAllocatedBundles();
@@ -1114,13 +1131,6 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
         }
     }
 
-    private String getBrokerAddress() {
-        return String.format("%s:%s", pulsar.getAdvertisedAddress(),
-                pulsar.getConfiguration().getWebServicePort().isPresent()
-                        ? pulsar.getConfiguration().getWebServicePort().get()
-                        : pulsar.getConfiguration().getWebServicePortTls());
-    }
-
     @Override
     public void setLoadReportForceUpdateFlag() {
         this.forceLoadReportUpdate = true;
@@ -1130,10 +1140,12 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     public void writeLoadReportOnZookeeper() throws Exception {
         // update average JVM heap usage to average value of the last 120 seconds
         long realtimeJvmHeapUsage = getRealtimeJvmHeapUsageMBytes();
+        int minInterval = pulsar.getConfiguration().getLoadBalancerReportUpdateMinIntervalMillis();
         if (this.avgJvmHeapUsageMBytes <= 0) {
             this.avgJvmHeapUsageMBytes = realtimeJvmHeapUsage;
         } else {
-            long weight = Math.max(1, TimeUnit.SECONDS.toMillis(120) / LOAD_REPORT_UPDATE_MIMIMUM_INTERVAL);
+
+            long weight = Math.max(1, TimeUnit.SECONDS.toMillis(120) / minInterval);
             this.avgJvmHeapUsageMBytes = ((weight - 1) * this.avgJvmHeapUsageMBytes + realtimeJvmHeapUsage) / weight;
         }
 
@@ -1152,14 +1164,11 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             int maxUpdateIntervalInMinutes = pulsar.getConfiguration().getLoadBalancerReportUpdateMaxIntervalMinutes();
             if (timeElapsedSinceLastReport > TimeUnit.MINUTES.toMillis(maxUpdateIntervalInMinutes)) {
                 needUpdate = true;
-            } else if (timeElapsedSinceLastReport > LOAD_REPORT_UPDATE_MIMIMUM_INTERVAL) {
+            } else if (timeElapsedSinceLastReport > minInterval) {
                 // check number of bundles assigned, comparing with last LoadReport
                 long oldBundleCount = lastLoadReport.getNumBundles();
                 long newBundleCount = pulsar.getBrokerService().getNumberOfNamespaceBundles();
                 long bundleCountChange = Math.abs(oldBundleCount - newBundleCount);
-                long maxCapacity = ResourceUnitRanking.calculateBrokerMaxCapacity(
-                        lastLoadReport.getSystemResourceUsage(),
-                        pulsar.getLocalZkCacheService().getResourceQuotaCache().getDefaultQuota());
                 if (newBundleCount != oldBundleCount) {
                     needUpdate = true;
                 }
@@ -1224,7 +1233,7 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
      */
     private boolean isLoadReportGenerationIntervalPassed() {
         long timeSinceLastGenMillis = System.currentTimeMillis() - lastLoadReport.getTimestamp();
-        return timeSinceLastGenMillis > LOAD_REPORT_UPDATE_MIMIMUM_INTERVAL;
+        return timeSinceLastGenMillis > pulsar.getConfiguration().getLoadBalancerReportUpdateMinIntervalMillis();
     }
 
     // todo: changeme: this can be optimized, we don't have to iterate through everytime
@@ -1234,9 +1243,8 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
         // this does not have "http://" in front, hacky but no time to pretty up
         Multimap<Long, ResourceUnit> brokers = getFinalCandidates(namespaceName, availableBrokers);
 
-        for (Object broker : brokers.values()) {
-            ResourceUnit underloadedRU = (ResourceUnit) broker;
-            LoadReport currentLoadReport = currentLoadReports.get(underloadedRU);
+        for (ResourceUnit broker : brokers.values()) {
+            LoadReport currentLoadReport = currentLoadReports.get(broker);
             if (isBelowLoadLevel(currentLoadReport.getSystemResourceUsage(), maxLoadLevel)) {
                 return true;
             }
@@ -1250,12 +1258,8 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             final String broker = resourceUnit.getResourceId();
             final Set<String> loadedBundles = ranking.getLoadedBundles();
             final Set<String> preallocatedBundles = resourceUnitRankings.get(resourceUnit).getPreAllocatedBundles();
-            final ConcurrentOpenHashMap<String, ConcurrentOpenHashSet<String>> namespaceToBundleRange =
-                    brokerToNamespaceToBundleRange
-                            .computeIfAbsent(broker.replace("http://", ""), k -> new ConcurrentOpenHashMap<>());
-            namespaceToBundleRange.clear();
-            LoadManagerShared.fillNamespaceToBundlesMap(loadedBundles, namespaceToBundleRange);
-            LoadManagerShared.fillNamespaceToBundlesMap(preallocatedBundles, namespaceToBundleRange);
+            brokerToNamespaceToBundleRange.reloadFromBundles(broker,
+                    Stream.of(loadedBundles, preallocatedBundles).flatMap(Collection::stream));
         });
     }
 
@@ -1372,7 +1376,8 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
             double totalBandwidth = stats.msgThroughputIn + stats.msgThroughputOut;
 
             boolean needSplit = false;
-            if (stats.topics > maxBundleTopics || totalSessions > maxBundleSessions || totalMsgRate > maxBundleMsgRate
+            if (stats.topics > maxBundleTopics || (maxBundleSessions > 0
+                    && totalSessions > maxBundleSessions) || totalMsgRate > maxBundleMsgRate
                     || totalBandwidth > maxBundleBandwidth) {
                 if (stats.topics <= 1) {
                     log.info("Unable to split hot namespace bundle {} since there is only one topic.", bundleName);
@@ -1422,9 +1427,19 @@ public class SimpleLoadManagerImpl implements LoadManager, Consumer<Notification
     }
 
     @Override
+    public String setNamespaceBundleAffinity(String bundle, String broker) {
+        if (StringUtils.isBlank(broker)) {
+            return this.bundleBrokerAffinityMap.remove(bundle);
+        }
+        return this.bundleBrokerAffinityMap.put(bundle, broker);
+    }
+
+    @Override
     public void stop() throws PulsarServerException {
         try {
-            loadReports.close();
+            if (loadReports != null) {
+                loadReports.close();
+            }
             scheduler.shutdownNow();
             scheduler.awaitTermination(5, TimeUnit.SECONDS);
         } catch (Exception e) {

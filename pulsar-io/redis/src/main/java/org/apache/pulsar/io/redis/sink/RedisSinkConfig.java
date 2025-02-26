@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,16 +21,17 @@ package org.apache.pulsar.io.redis.sink;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.google.common.base.Preconditions;
-import lombok.Data;
-import lombok.EqualsAndHashCode;
-import lombok.experimental.Accessors;
-import org.apache.pulsar.io.core.annotations.FieldDoc;
-import org.apache.pulsar.io.redis.RedisAbstractConfig;
-
 import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Map;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.experimental.Accessors;
+import org.apache.pulsar.io.common.IOConfigUtils;
+import org.apache.pulsar.io.core.SinkContext;
+import org.apache.pulsar.io.core.annotations.FieldDoc;
+import org.apache.pulsar.io.redis.RedisAbstractConfig;
 
 @Data
 @EqualsAndHashCode(callSuper = false)
@@ -41,13 +42,13 @@ public class RedisSinkConfig extends RedisAbstractConfig implements Serializable
 
     @FieldDoc(
         required = false,
-        defaultValue = "10000L",
+        defaultValue = "10000",
         help = "The amount of time in milliseconds before an operation is marked as timed out")
     private long operationTimeout = 10000L;
 
     @FieldDoc(
         required = false,
-        defaultValue = "1000L",
+        defaultValue = "1000",
         help = "The Redis operation time in milliseconds")
     private long batchTimeMs = 1000L;
 
@@ -63,9 +64,8 @@ public class RedisSinkConfig extends RedisAbstractConfig implements Serializable
         return mapper.readValue(new File(yamlFile), RedisSinkConfig.class);
     }
 
-    public static RedisSinkConfig load(Map<String, Object> map) throws IOException {
-        ObjectMapper mapper = new ObjectMapper();
-        return mapper.readValue(new ObjectMapper().writeValueAsString(map), RedisSinkConfig.class);
+    public static RedisSinkConfig load(Map<String, Object> map, SinkContext sinkContext) throws IOException {
+        return IOConfigUtils.loadWithSecrets(map, RedisSinkConfig.class, sinkContext);
     }
 
     @Override

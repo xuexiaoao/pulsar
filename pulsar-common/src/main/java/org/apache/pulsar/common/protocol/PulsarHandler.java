@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,8 @@
  */
 package org.apache.pulsar.common.protocol;
 
+import static org.apache.pulsar.common.util.Runnables.catchingAndLoggingThrowables;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.util.concurrent.ScheduledFuture;
 import java.net.SocketAddress;
@@ -30,6 +32,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Implementation of the channel handler to process inbound Pulsar data.
+ * <p>
+ * Please see {@link org.apache.pulsar.common.protocol.PulsarDecoder} javadoc for important details about handle* method
+ * parameter instance lifecycle.
  */
 public abstract class PulsarHandler extends PulsarDecoder {
     protected ChannelHandlerContext ctx;
@@ -52,7 +57,7 @@ public abstract class PulsarHandler extends PulsarDecoder {
     }
 
     @Override
-    final protected void messageReceived() {
+    protected void messageReceived() {
         waitingForPingResponse = false;
     }
 
@@ -62,11 +67,12 @@ public abstract class PulsarHandler extends PulsarDecoder {
         this.ctx = ctx;
 
         if (log.isDebugEnabled()) {
-            log.debug("[{}] Scheduling keep-alive task every {} s", ctx.channel(), keepAliveIntervalSeconds);
+            log.debug("[{}] Scheduling keep-alive task every {} s", this.toString(), keepAliveIntervalSeconds);
         }
         if (keepAliveIntervalSeconds > 0) {
-            this.keepAliveTask = ctx.executor().scheduleAtFixedRate(this::handleKeepAliveTimeout,
-                    keepAliveIntervalSeconds, keepAliveIntervalSeconds, TimeUnit.SECONDS);
+            this.keepAliveTask = ctx.executor()
+                    .scheduleAtFixedRate(catchingAndLoggingThrowables(this::handleKeepAliveTimeout),
+                            keepAliveIntervalSeconds, keepAliveIntervalSeconds, TimeUnit.SECONDS);
         }
     }
 
@@ -76,16 +82,23 @@ public abstract class PulsarHandler extends PulsarDecoder {
     }
 
     @Override
-    final protected void handlePing(CommandPing ping) {
+    protected final void handlePing(CommandPing ping) {
         // Immediately reply success to ping requests
         if (log.isDebugEnabled()) {
-            log.debug("[{}] Replying back to ping message", ctx.channel());
+            log.debug("[{}] Replying back to ping message", this.toString());
         }
-        ctx.writeAndFlush(Commands.newPong());
+        ctx.writeAndFlush(Commands.newPong())
+                .addListener(future -> {
+                    if (!future.isSuccess()) {
+                        log.warn("[{}] Forcing connection to close since cannot send a pong message.",
+                                toString(), future.cause());
+                        ctx.close();
+                    }
+                });
     }
 
     @Override
-    final protected void handlePong(CommandPong pong) {
+    protected final void handlePong(CommandPong pong) {
     }
 
     private void handleKeepAliveTimeout() {
@@ -94,29 +107,40 @@ public abstract class PulsarHandler extends PulsarDecoder {
         }
 
         if (!isHandshakeCompleted()) {
-            log.warn("[{}] Pulsar Handshake was not completed within timeout, closing connection", ctx.channel());
+            log.warn("[{}] Pulsar Handshake was not completed within timeout, closing connection", this.toString());
             ctx.close();
         } else if (waitingForPingResponse && ctx.channel().config().isAutoRead()) {
             // We were waiting for a response and another keep-alive just completed.
             // If auto-read was disabled, it means we stopped reading from the connection, so we might receive the Ping
             // response later and thus not enforce the strict timeout here.
-            log.warn("[{}] Forcing connection to close after keep-alive timeout", ctx.channel());
+            log.warn("[{}] Forcing connection to close after keep-alive timeout", this.toString());
             ctx.close();
         } else if (getRemoteEndpointProtocolVersion() >= ProtocolVersion.v1.getValue()) {
             // Send keep alive probe to peer only if it supports the ping/pong commands, added in v1
             if (log.isDebugEnabled()) {
-                log.debug("[{}] Sending ping message", ctx.channel());
+                log.debug("[{}] Sending ping message", this.toString());
             }
             waitingForPingResponse = true;
-            ctx.writeAndFlush(Commands.newPing());
+            sendPing();
         } else {
             if (log.isDebugEnabled()) {
-                log.debug("[{}] Peer doesn't support keep-alive", ctx.channel());
+                log.debug("[{}] Peer doesn't support keep-alive", this.toString());
             }
         }
     }
 
-    protected void cancelKeepAliveTask() {
+    protected ChannelFuture sendPing() {
+        return ctx.writeAndFlush(Commands.newPing())
+                .addListener(future -> {
+                    if (!future.isSuccess()) {
+                        log.warn("[{}] Forcing connection to close since cannot send a ping message.",
+                                this.toString(), future.cause());
+                        ctx.close();
+                    }
+                });
+    }
+
+    public void cancelKeepAliveTask() {
         if (keepAliveTask != null) {
             keepAliveTask.cancel(false);
             keepAliveTask = null;
@@ -127,6 +151,21 @@ public abstract class PulsarHandler extends PulsarDecoder {
      * @return true if the connection is ready to use, meaning the Pulsar handshake was already completed
      */
     protected abstract boolean isHandshakeCompleted();
+
+    /**
+     * Demo: [id: 0x2561bcd1, L:/10.0.136.103:6650 ! R:/240.240.0.5:58038].
+     * L: local Address.
+     * R: remote address.
+     */
+    @Override
+    public String toString() {
+        ChannelHandlerContext ctx = this.ctx;
+        if (ctx == null) {
+            return "[ctx: null]";
+        } else {
+            return ctx.channel().toString();
+        }
+    }
 
     private static final Logger log = LoggerFactory.getLogger(PulsarHandler.class);
 }

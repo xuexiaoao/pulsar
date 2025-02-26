@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -16,11 +16,13 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.pulsar.io.kafka.sink;
 
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
+import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.common.io.SinkConfig;
 import org.apache.pulsar.functions.api.Record;
 import org.apache.pulsar.io.core.KeyValue;
 import org.apache.pulsar.io.core.SinkContext;
@@ -45,7 +47,7 @@ public class KafkaAbstractSinkTest {
     private static class DummySink extends KafkaAbstractSink<String, byte[]> {
 
         @Override
-        public KeyValue extractKeyValue(Record record) {
+        public KeyValue<String, byte[]> extractKeyValue(Record<byte[]> record) {
             return new KeyValue<>(record.getKey().orElse(null), record.getValue());
         }
     }
@@ -72,7 +74,7 @@ public class KafkaAbstractSinkTest {
 
     @Test
     public void testInvalidConfigWillThrownException() throws Exception {
-        KafkaAbstractSink sink = new DummySink();
+        KafkaAbstractSink<String, byte[]> sink = new DummySink();
         Map<String, Object> config = new HashMap<>();
         SinkContext sc = new SinkContext() {
             @Override
@@ -92,6 +94,11 @@ public class KafkaAbstractSinkTest {
 
             @Override
             public Collection<String> getInputTopics() {
+                return null;
+            }
+
+            @Override
+            public SinkConfig getSinkConfig() {
                 return null;
             }
 
@@ -157,15 +164,25 @@ public class KafkaAbstractSinkTest {
             public CompletableFuture<ByteBuffer> getStateAsync(String key) {
                 return null;
             }
-            
+
             @Override
             public void deleteState(String key) {
-            	
+
             }
-            
+
             @Override
             public CompletableFuture<Void> deleteStateAsync(String key) {
             	return null;
+            }
+
+            @Override
+            public PulsarClient getPulsarClient() {
+                return null;
+            }
+
+            @Override
+            public void fatal(Throwable t) {
+
             }
         };
         ThrowingRunnable openAndClose = ()->{
@@ -176,12 +193,12 @@ public class KafkaAbstractSinkTest {
                 sink.close();
             }
         };
-        expectThrows(NullPointerException.class, "Kafka topic is not set", openAndClose);
-        config.put("topic", "topic_2");
-        expectThrows(NullPointerException.class, "Kafka bootstrapServers is not set", openAndClose);
+        expectThrows(IllegalArgumentException.class, "bootstrapServers cannot be null", openAndClose);
         config.put("bootstrapServers", "localhost:6667");
-        expectThrows(NullPointerException.class, "Kafka acks mode is not set", openAndClose);
+        expectThrows(IllegalArgumentException.class, "acks cannot be null", openAndClose);
         config.put("acks", "1");
+        expectThrows(IllegalArgumentException.class, "topic cannot be null", openAndClose);
+        config.put("topic", "topic_2");
         config.put("batchSize", "-1");
         expectThrows(IllegalArgumentException.class, "Invalid Kafka Producer batchSize : -1", openAndClose);
         config.put("batchSize", "16384");
@@ -213,6 +230,24 @@ public class KafkaAbstractSinkTest {
         assertEquals("SASL_PLAINTEXT", props.getProperty("security.protocol"));
         assertEquals("GSSAPI", props.getProperty("sasl.mechanism"));
         assertEquals("1", props.getProperty(ProducerConfig.ACKS_CONFIG));
+    }
+
+    @Test
+    public final void loadFromSaslYamlFileTest() throws IOException {
+        File yamlFile = getFile("kafkaSinkConfigSasl.yaml");
+        KafkaSinkConfig config = KafkaSinkConfig.load(yamlFile.getAbsolutePath());
+        assertNotNull(config);
+        assertEquals(config.getBootstrapServers(), "localhost:6667");
+        assertEquals(config.getTopic(), "test");
+        assertEquals(config.getAcks(), "1");
+        assertEquals(config.getBatchSize(), 16384L);
+        assertEquals(config.getMaxRequestSize(), 1048576L);
+        assertEquals(config.getSecurityProtocol(), SecurityProtocol.SASL_PLAINTEXT.name);
+        assertEquals(config.getSaslMechanism(), "PLAIN");
+        assertEquals(config.getSaslJaasConfig(), "org.apache.kafka.common.security.plain.PlainLoginModule required \nusername=\"alice\" \npassword=\"pwd\";");
+        assertEquals(config.getSslEndpointIdentificationAlgorithm(), "");
+        assertEquals(config.getSslTruststoreLocation(), "/etc/cert.pem");
+        assertEquals(config.getSslTruststorePassword(), "cert_pwd");
     }
 
     private File getFile(String name) {

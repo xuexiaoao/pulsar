@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,51 +19,51 @@
 package org.apache.pulsar.broker.transaction;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
-
-import com.google.common.collect.Sets;
-
+import static org.testng.Assert.assertTrue;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-
 import lombok.Cleanup;
 import lombok.extern.slf4j.Slf4j;
-
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
+import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.ReadOnlyCursor;
-import org.apache.bookkeeper.mledger.impl.PositionImpl;
 import org.apache.commons.lang3.tuple.MutablePair;
 import org.apache.pulsar.broker.PulsarService;
+import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
+import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.broker.transaction.pendingack.impl.PendingAckHandleImpl;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.api.transaction.Transaction;
 import org.apache.pulsar.client.impl.transaction.TransactionImpl;
 import org.apache.pulsar.common.api.proto.MarkerType;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
-import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
-import org.apache.pulsar.common.policies.data.ClusterData;
-import org.apache.pulsar.common.policies.data.ClusterDataImpl;
-import org.apache.pulsar.common.policies.data.TenantInfoImpl;
 import org.apache.pulsar.common.protocol.Commands;
+import org.apache.pulsar.transaction.coordinator.exceptions.CoordinatorException;
 import org.awaitility.Awaitility;
 import org.testng.Assert;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 /**
@@ -74,47 +74,20 @@ import org.testng.annotations.Test;
 public class TransactionProduceTest extends TransactionTestBase {
 
     private static final int TOPIC_PARTITION = 3;
-
-    private static final String TENANT = "tnx";
-    private static final String NAMESPACE1 = TENANT + "/ns1";
     private static final String PRODUCE_COMMIT_TOPIC = NAMESPACE1 + "/produce-commit";
     private static final String PRODUCE_ABORT_TOPIC = NAMESPACE1 + "/produce-abort";
     private static final String ACK_COMMIT_TOPIC = NAMESPACE1 + "/ack-commit";
     private static final String ACK_ABORT_TOPIC = NAMESPACE1 + "/ack-abort";
-
-    @BeforeMethod
+    private static final int NUM_PARTITIONS = 16;
+    @BeforeClass
     protected void setup() throws Exception {
-        internalSetup();
-
-        String[] brokerServiceUrlArr = getPulsarServiceList().get(0).getBrokerServiceUrl().split(":");
-        String webServicePort = brokerServiceUrlArr[brokerServiceUrlArr.length -1];
-        admin.clusters().createCluster(CLUSTER_NAME, ClusterData.builder().serviceUrl("http://localhost:" + webServicePort).build());
-        admin.tenants().createTenant(TENANT,
-                new TenantInfoImpl(Sets.newHashSet("appid1"), Sets.newHashSet(CLUSTER_NAME)));
-        admin.namespaces().createNamespace(NAMESPACE1);
-        admin.topics().createPartitionedTopic(PRODUCE_COMMIT_TOPIC, 3);
-        admin.topics().createPartitionedTopic(PRODUCE_ABORT_TOPIC, 3);
-        admin.topics().createPartitionedTopic(ACK_COMMIT_TOPIC, 3);
-        admin.topics().createPartitionedTopic(ACK_ABORT_TOPIC, 3);
-
-        admin.tenants().createTenant(NamespaceName.SYSTEM_NAMESPACE.getTenant(),
-                new TenantInfoImpl(Sets.newHashSet("appid1"), Sets.newHashSet(CLUSTER_NAME)));
-        admin.namespaces().createNamespace(NamespaceName.SYSTEM_NAMESPACE.toString());
-        admin.topics().createPartitionedTopic(TopicName.TRANSACTION_COORDINATOR_ASSIGN.toString(), 16);
-
-        if (pulsarClient != null) {
-            pulsarClient.shutdown();
-        }
-        pulsarClient = PulsarClient.builder()
-                .serviceUrl(getPulsarServiceList().get(0).getBrokerServiceUrl())
-                .statsInterval(0, TimeUnit.SECONDS)
-                .enableTransaction(true)
-                .build();
-
-        Thread.sleep(1000 * 3);
+        setUpBase(1, NUM_PARTITIONS, PRODUCE_COMMIT_TOPIC, TOPIC_PARTITION);
+        admin.topics().createPartitionedTopic(PRODUCE_ABORT_TOPIC, TOPIC_PARTITION);
+        admin.topics().createPartitionedTopic(ACK_COMMIT_TOPIC, TOPIC_PARTITION);
+        admin.topics().createPartitionedTopic(ACK_ABORT_TOPIC, TOPIC_PARTITION);
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterClass(alwaysRun = true)
     protected void cleanup() throws Exception {
         super.internalCleanup();
     }
@@ -212,6 +185,37 @@ public class TransactionProduceTest extends TransactionTestBase {
         log.info("produce and {} test finished.", endAction ? "commit" : "abort");
     }
 
+    @Test
+    public void testUpdateLastMaxReadPositionMovedForwardTimestampForTransactionalPublish() throws Exception {
+        final String topic = NAMESPACE1 + "/testUpdateLastMaxReadPositionMovedForwardTimestampForTransactionalPublish";
+        PulsarClient pulsarClient = this.pulsarClient;
+        Transaction txn = pulsarClient.newTransaction()
+                .withTransactionTimeout(5, TimeUnit.SECONDS)
+                .build().get();
+        @Cleanup
+        Producer<byte[]> producer = pulsarClient
+                .newProducer()
+                .topic(topic)
+                .sendTimeout(0, TimeUnit.SECONDS)
+                .create();
+        PersistentTopic persistentTopic = getTopic(topic);
+        long lastMaxReadPositionMovedForwardTimestamp = persistentTopic.getLastMaxReadPositionMovedForwardTimestamp();
+
+        // transactional publish will not update lastMaxReadPositionMovedForwardTimestamp
+        producer.newMessage(txn).value("hello world".getBytes()).send();
+        assertTrue(persistentTopic.getLastMaxReadPositionMovedForwardTimestamp() == lastMaxReadPositionMovedForwardTimestamp);
+
+        // commit transaction will update lastMaxReadPositionMovedForwardTimestamp
+        txn.commit().get();
+        assertTrue(persistentTopic.getLastMaxReadPositionMovedForwardTimestamp() > lastMaxReadPositionMovedForwardTimestamp);
+    }
+
+    private PersistentTopic getTopic(String topic) throws ExecutionException, InterruptedException {
+        Optional<Topic> optionalTopic = getPulsarServiceList().get(0).getBrokerService()
+                .getTopic(topic, true).get();
+        return (PersistentTopic) optionalTopic.get();
+    }
+
     private void checkMessageId(List<CompletableFuture<MessageId>> futureList, boolean isFinished) {
         futureList.forEach(messageIdFuture -> {
             try {
@@ -243,9 +247,9 @@ public class TransactionProduceTest extends TransactionTestBase {
             if (partition >= 0) {
                 topic = TopicName.get(topic).toString() + TopicName.PARTITIONED_TOPIC_SUFFIX + partition;
             }
-            return getPulsarServiceList().get(0).getManagedLedgerFactory().openReadOnlyCursor(
+            return getPulsarServiceList().get(0).getDefaultManagedLedgerFactory().openReadOnlyCursor(
                     TopicName.get(topic).getPersistenceNamingEncoding(),
-                    PositionImpl.earliest, new ManagedLedgerConfig());
+                    PositionFactory.EARLIEST, new ManagedLedgerConfig());
         } catch (Exception e) {
             log.error("Failed to get origin topic readonly cursor.", e);
             Assert.fail("Failed to get origin topic readonly cursor.");
@@ -262,6 +266,7 @@ public class TransactionProduceTest extends TransactionTestBase {
                 .build().get();
         log.info("init transaction {}.", txn);
 
+        @Cleanup
         Producer<byte[]> incomingProducer = pulsarClient.newProducer()
                 .topic(ACK_COMMIT_TOPIC)
                 .batchingMaxMessages(1)
@@ -273,6 +278,7 @@ public class TransactionProduceTest extends TransactionTestBase {
         }
         log.info("prepare incoming messages finished.");
 
+        @Cleanup
         Consumer<byte[]> consumer = pulsarClient.newConsumer()
                 .topic(ACK_COMMIT_TOPIC)
                 .subscriptionName(subscriptionName)
@@ -289,10 +295,9 @@ public class TransactionProduceTest extends TransactionTestBase {
             consumer.acknowledgeAsync(message.getMessageId(), txn);
         }
 
-        Thread.sleep(1000);
-
         // The pending messages count should be the incomingMessageCnt
-        Assert.assertEquals(getPendingAckCount(ACK_COMMIT_TOPIC, subscriptionName), incomingMessageCnt);
+        Awaitility.await().untilAsserted(
+                () -> Assert.assertEquals(getPendingAckCount(ACK_COMMIT_TOPIC, subscriptionName), incomingMessageCnt));
 
         consumer.redeliverUnacknowledgedMessages();
         Message<byte[]> message = consumer.receive(2, TimeUnit.SECONDS);
@@ -303,10 +308,9 @@ public class TransactionProduceTest extends TransactionTestBase {
 
         txn.commit().get();
 
-        Thread.sleep(1000);
-
         // After commit, the pending messages count should be 0
-        Assert.assertEquals(getPendingAckCount(ACK_COMMIT_TOPIC, subscriptionName), 0);
+        Awaitility.await().untilAsserted(
+                () -> Assert.assertEquals(getPendingAckCount(ACK_COMMIT_TOPIC, subscriptionName), 0));
 
         consumer.redeliverUnacknowledgedMessages();
         for (int i = 0; i < incomingMessageCnt; i++) {
@@ -322,10 +326,11 @@ public class TransactionProduceTest extends TransactionTestBase {
         final String subscriptionName = "ackAbortTest";
         Transaction txn = pulsarClient
                 .newTransaction()
-                .withTransactionTimeout(5, TimeUnit.SECONDS)
+                .withTransactionTimeout(30, TimeUnit.SECONDS)
                 .build().get();
         log.info("init transaction {}.", txn);
 
+        @Cleanup
         Producer<byte[]> incomingProducer = pulsarClient.newProducer()
                 .topic(ACK_ABORT_TOPIC)
                 .batchingMaxMessages(1)
@@ -337,6 +342,7 @@ public class TransactionProduceTest extends TransactionTestBase {
         }
         log.info("prepare incoming messages finished.");
 
+        @Cleanup
         Consumer<byte[]> consumer = pulsarClient.newConsumer()
                 .topic(ACK_ABORT_TOPIC)
                 .subscriptionName(subscriptionName)
@@ -352,10 +358,9 @@ public class TransactionProduceTest extends TransactionTestBase {
             consumer.acknowledgeAsync(message.getMessageId(), txn);
         }
 
-        Thread.sleep(1000);
-
         // The pending messages count should be the incomingMessageCnt
-        Assert.assertEquals(getPendingAckCount(ACK_ABORT_TOPIC, subscriptionName), incomingMessageCnt);
+        Awaitility.await().untilAsserted(
+                () -> Assert.assertEquals(getPendingAckCount(ACK_ABORT_TOPIC, subscriptionName), incomingMessageCnt));
 
         consumer.redeliverUnacknowledgedMessages();
         Message<byte[]> message = consumer.receive(2, TimeUnit.SECONDS);
@@ -366,10 +371,9 @@ public class TransactionProduceTest extends TransactionTestBase {
 
         txn.abort().get();
 
-        Thread.sleep(1000);
-
         // After commit, the pending messages count should be 0
-        Assert.assertEquals(getPendingAckCount(ACK_ABORT_TOPIC, subscriptionName), 0);
+        Awaitility.await().untilAsserted(
+                () -> Assert.assertEquals(getPendingAckCount(ACK_ABORT_TOPIC, subscriptionName), 0));
 
         consumer.redeliverUnacknowledgedMessages();
         for (int i = 0; i < incomingMessageCnt; i++) {
@@ -386,7 +390,7 @@ public class TransactionProduceTest extends TransactionTestBase {
 
         int pendingAckCount = 0;
         for (PulsarService pulsarService : getPulsarServiceList()) {
-            for (String key : pulsarService.getBrokerService().getTopics().keys()) {
+            for (String key : pulsarService.getBrokerService().getTopics().keySet()) {
                 if (key.contains(topic)) {
                     Field field = clazz.getDeclaredField("pendingAckHandle");
                     field.setAccessible(true);
@@ -397,8 +401,8 @@ public class TransactionProduceTest extends TransactionTestBase {
                     field = PendingAckHandleImpl.class.getDeclaredField("individualAckPositions");
                     field.setAccessible(true);
 
-                    Map<PositionImpl, MutablePair<PositionImpl, Long>> map =
-                            (Map<PositionImpl, MutablePair<PositionImpl, Long>>) field.get(pendingAckHandle);
+                    Map<Position, MutablePair<Position, Long>> map =
+                            (Map<Position, MutablePair<Position, Long>>) field.get(pendingAckHandle);
                     if (map != null) {
                         pendingAckCount += map.size();
                     }
@@ -409,5 +413,26 @@ public class TransactionProduceTest extends TransactionTestBase {
         return pendingAckCount;
     }
 
-
+    @Test
+    public void testCommitFailure() throws Exception {
+        Transaction txn = pulsarClient.newTransaction().build().get();
+        final String topic = NAMESPACE1 + "/test-commit-failure";
+        @Cleanup
+        final Producer<byte[]> producer = pulsarClient.newProducer().topic(topic).create();
+        producer.newMessage(txn).value(new byte[1024 * 1024 * 10]).sendAsync();
+        try {
+            txn.commit().get();
+            Assert.fail();
+        } catch (ExecutionException e) {
+            Assert.assertTrue(e.getCause() instanceof PulsarClientException.TransactionHasOperationFailedException);
+            Assert.assertEquals(txn.getState(), Transaction.State.ABORTED);
+        }
+        try {
+            getPulsarServiceList().get(0).getTransactionMetadataStoreService().getTxnMeta(txn.getTxnID())
+                    .getNow(null);
+            Assert.fail();
+        } catch (CompletionException e) {
+            Assert.assertTrue(e.getCause() instanceof CoordinatorException.TransactionNotFoundException);
+        }
+    }
 }

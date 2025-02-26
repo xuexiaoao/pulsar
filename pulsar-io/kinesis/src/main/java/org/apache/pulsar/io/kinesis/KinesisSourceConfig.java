@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,33 +18,30 @@
  */
 package org.apache.pulsar.io.kinesis;
 
-import java.io.File;
-import java.io.IOException;
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import java.io.Serializable;
 import java.net.URI;
 import java.util.Date;
 import java.util.Map;
-
+import lombok.Data;
+import lombok.EqualsAndHashCode;
 import org.apache.pulsar.io.aws.AwsCredentialProviderPlugin;
+import org.apache.pulsar.io.common.IOConfigUtils;
+import org.apache.pulsar.io.core.SourceContext;
 import org.apache.pulsar.io.core.annotations.FieldDoc;
-
 import software.amazon.awssdk.services.cloudwatch.CloudWatchAsyncClient;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchAsyncClientBuilder;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClientBuilder;
 import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
 import software.amazon.awssdk.services.kinesis.KinesisAsyncClientBuilder;
+import software.amazon.kinesis.common.InitialPositionInStream;
 import software.amazon.kinesis.common.InitialPositionInStreamExtended;
 import software.amazon.kinesis.common.KinesisClientUtil;
-import software.amazon.kinesis.common.InitialPositionInStream;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-
-import lombok.Data;
-import lombok.EqualsAndHashCode;
 
 @Data
-@EqualsAndHashCode(callSuper=true)
+@EqualsAndHashCode(callSuper = true)
 public class KinesisSourceConfig extends BaseKinesisConfig implements Serializable {
 
     private static final long serialVersionUID = 1L;
@@ -80,7 +77,7 @@ public class KinesisSourceConfig extends BaseKinesisConfig implements Serializab
 
     @FieldDoc(
         required = false,
-        defaultValue = "Apache Pulsar IO Connector",
+        defaultValue = "pulsar-kinesis",
         help = "Name of the Amazon Kinesis application. By default the application name is included "
                 + "in the user agent string used to make AWS requests. This can assist with troubleshooting "
                 + "(e.g. distinguish requests made by separate connectors instances)."
@@ -128,22 +125,25 @@ public class KinesisSourceConfig extends BaseKinesisConfig implements Serializab
 
     @FieldDoc(
         required = false,
-        defaultValue = "",
-        help = "Cloudwatch end-point url. It can be found at https://docs.aws.amazon.com/general/latest/gr/rande.html"
-    )
-    private String cloudwatchEndpoint = "";
-
-    @FieldDoc(
-        required = false,
         defaultValue = "true",
         help = "When true, uses Kinesis enhanced fan-out, when false, uses polling"
     )
     private boolean useEnhancedFanOut = true;
 
-
-    public static KinesisSourceConfig load(String yamlFile) throws IOException {
-        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
-        return mapper.readValue(new File(yamlFile), KinesisSourceConfig.class);
+    public static KinesisSourceConfig load(Map<String, Object> config, SourceContext sourceContext) {
+        KinesisSourceConfig kinesisSourceConfig = IOConfigUtils.loadWithSecrets(config,
+                KinesisSourceConfig.class, sourceContext);
+        boolean isNotBlankEndpoint = isNotBlank(kinesisSourceConfig.getAwsEndpoint())
+                && isNotBlank(kinesisSourceConfig.getCloudwatchEndpoint())
+                && isNotBlank(kinesisSourceConfig.getDynamoEndpoint());
+        checkArgument(isNotBlank(kinesisSourceConfig.getAwsRegion()) || isNotBlankEndpoint,
+                "Either \"awsRegion\" must be set OR all of "
+                        + "[ \"awsEndpoint\", \"cloudwatchEndpoint\", and \"dynamoEndpoint\" ] must be set.");
+        if (kinesisSourceConfig.getInitialPositionInStream() == InitialPositionInStream.AT_TIMESTAMP) {
+            checkArgument((kinesisSourceConfig.getStartAtTime() != null),
+                    "When initialPositionInStream is AT_TIMESTAMP, startAtTime must be specified");
+        }
+        return kinesisSourceConfig;
     }
 
     public KinesisAsyncClient buildKinesisAsyncClient(AwsCredentialProviderPlugin credPlugin) {
@@ -188,8 +188,7 @@ public class KinesisSourceConfig extends BaseKinesisConfig implements Serializab
     public InitialPositionInStreamExtended getStreamStartPosition() {
         if (initialPositionInStream == InitialPositionInStream.AT_TIMESTAMP) {
             return InitialPositionInStreamExtended.newInitialPositionAtTimestamp(getStartAtTime());
-        }
-        else {
+        } else {
             return InitialPositionInStreamExtended.newInitialPosition(this.getInitialPositionInStream());
         }
     }

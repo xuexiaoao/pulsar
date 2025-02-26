@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -23,6 +23,8 @@ import java.net.URI;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import org.apache.pulsar.broker.authentication.AuthenticationParameters;
+import org.apache.pulsar.client.admin.LongRunningProcessStatus;
 import org.apache.pulsar.common.functions.WorkerInfo;
 import org.apache.pulsar.common.io.ConnectorDefinition;
 import org.apache.pulsar.common.policies.data.WorkerFunctionInstanceStats;
@@ -34,20 +36,25 @@ import org.apache.pulsar.functions.worker.WorkerService;
  */
 public interface Workers<W extends WorkerService> {
 
-    List<WorkerInfo> getCluster(String clientRole);
+    List<WorkerInfo> getCluster(AuthenticationParameters authParams);
 
-    WorkerInfo getClusterLeader(String clientRole);
+    WorkerInfo getClusterLeader(AuthenticationParameters authParams);
 
-    Map<String, Collection<String>> getAssignments(String clientRole);
+    Map<String, Collection<String>> getAssignments(AuthenticationParameters authParams);
 
-    List<Metrics> getWorkerMetrics(final String clientRole);
+    List<Metrics> getWorkerMetrics(AuthenticationParameters authParams);
 
-    List<WorkerFunctionInstanceStats> getFunctionsMetrics(String clientRole) throws IOException;
+    List<WorkerFunctionInstanceStats> getFunctionsMetrics(AuthenticationParameters authParams) throws IOException;
 
-    List<ConnectorDefinition> getListOfConnectors(String clientRole);
+    List<ConnectorDefinition> getListOfConnectors(AuthenticationParameters authParams);
 
-    void rebalance(final URI uri, final String clientRole);
+    void rebalance(URI uri, AuthenticationParameters authParams);
 
-    Boolean isLeaderReady(final String clientRole);
+    void drain(URI uri, String workerId, AuthenticationParameters authParams, boolean leaderUri);
+
+    LongRunningProcessStatus getDrainStatus(URI uri, String workerId, AuthenticationParameters authParams,
+                                            boolean leaderUri);
+
+    boolean isLeaderReady(AuthenticationParameters authParams);
 
 }
