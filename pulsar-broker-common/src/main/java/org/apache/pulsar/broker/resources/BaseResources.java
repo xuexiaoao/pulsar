@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,16 +19,24 @@
 package org.apache.pulsar.broker.resources;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.common.base.Joiner;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.metadata.api.MetadataCache;
+import org.apache.pulsar.metadata.api.MetadataCacheConfig;
+import org.apache.pulsar.metadata.api.MetadataStore;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
-import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 
 /**
  * Base class for all configuration resources to access configurations from metadata-store.
@@ -36,42 +44,84 @@ import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
  * @param <T>
  *            type of configuration-resources.
  */
+@Slf4j
 public class BaseResources<T> {
 
+    protected static final String BASE_POLICIES_PATH = "/admin/policies";
+    protected static final String BASE_CLUSTERS_PATH = "/admin/clusters";
+    protected static final String LOCAL_POLICIES_ROOT = "/admin/local-policies";
+
     @Getter
-    private final MetadataStoreExtended store;
+    private final MetadataStore store;
     @Getter
     private final MetadataCache<T> cache;
     private int operationTimeoutSec;
 
-    public BaseResources(MetadataStoreExtended store, Class<T> clazz, int operationTimeoutSec) {
+    public BaseResources(MetadataStore store, Class<T> clazz, int operationTimeoutSec) {
         this.store = store;
-        this.cache = store.getMetadataCache(clazz);
+        this.cache = store.getMetadataCache(clazz, MetadataCacheConfig.builder()
+                .retryBackoff(MetadataCacheConfig.DEFAULT_RETRY_BACKOFF_BUILDER.setMandatoryStop(operationTimeoutSec,
+                        TimeUnit.SECONDS))
+                .build());
         this.operationTimeoutSec = operationTimeoutSec;
     }
 
-    public BaseResources(MetadataStoreExtended store, TypeReference<T> typeRef, int operationTimeoutSec) {
+    public BaseResources(MetadataStore store, TypeReference<T> typeRef, int operationTimeoutSec) {
         this.store = store;
-        this.cache = store.getMetadataCache(typeRef);
+        this.cache = store.getMetadataCache(typeRef, MetadataCacheConfig.builder()
+                .retryBackoff(MetadataCacheConfig.DEFAULT_RETRY_BACKOFF_BUILDER.setMandatoryStop(operationTimeoutSec,
+                        TimeUnit.SECONDS))
+                .build());
         this.operationTimeoutSec = operationTimeoutSec;
     }
 
-    public List<String> getChildren(String path) throws MetadataStoreException {
+    protected List<String> getChildren(String path) throws MetadataStoreException {
         try {
             return getChildrenAsync(path).get(operationTimeoutSec, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
             throw (e.getCause() instanceof MetadataStoreException) ? (MetadataStoreException) e.getCause()
                     : new MetadataStoreException(e.getCause());
         } catch (Exception e) {
-            throw new MetadataStoreException("Failed to get childeren of " + path, e);
+            throw new MetadataStoreException("Failed to get children of " + path, e);
         }
     }
 
-    public CompletableFuture<List<String>> getChildrenAsync(String path) {
+    protected CompletableFuture<List<String>> getChildrenAsync(String path) {
         return cache.getChildren(path);
     }
 
-    public Optional<T> get(String path) throws MetadataStoreException {
+    protected CompletableFuture<List<String>> getChildrenRecursiveAsync(String path) {
+        Set<String> children = ConcurrentHashMap.newKeySet();
+        CompletableFuture<List<String>> result = new CompletableFuture<>();
+        getChildrenRecursiveAsync(path, children, result, new AtomicInteger(1), path);
+        return result;
+    }
+
+    private void getChildrenRecursiveAsync(String path, Set<String> children, CompletableFuture<List<String>> result,
+            AtomicInteger totalResults, String parent) {
+        cache.getChildren(path).thenAccept(childList -> {
+            childList = childList != null ? childList : Collections.emptyList();
+            if (totalResults.decrementAndGet() == 0 && childList.isEmpty()) {
+                result.complete(new ArrayList<>(children));
+                return;
+            }
+            if (childList.isEmpty()) {
+                return;
+            }
+            // remove current node from children if current node is not leaf
+            children.remove(parent);
+            // childPrefix creates a path hierarchy if children has multi level path
+            String childPrefix = path.equals(parent) ? "" : parent + "/";
+            totalResults.addAndGet(childList.size());
+            for (String child : childList) {
+                children.add(childPrefix + child);
+                String childPath = path + "/" + child;
+                getChildrenRecursiveAsync(childPath, children, result, totalResults, child);
+            }
+        });
+    }
+
+    protected Optional<T> get(String path) throws MetadataStoreException {
         try {
             return getAsync(path).get(operationTimeoutSec, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
@@ -82,11 +132,18 @@ public class BaseResources<T> {
         }
     }
 
-    public CompletableFuture<Optional<T>> getAsync(String path) {
+    protected CompletableFuture<Optional<T>> getAsync(String path) {
         return cache.get(path);
     }
 
-    public void set(String path, Function<T, T> modifyFunction) throws MetadataStoreException {
+    protected CompletableFuture<Optional<T>> refreshAndGetAsync(String path) {
+        return store.sync(path).thenCompose(___ -> {
+            cache.invalidate(path);
+            return cache.get(path);
+        });
+    }
+
+    protected void set(String path, Function<T, T> modifyFunction) throws MetadataStoreException {
         try {
             setAsync(path, modifyFunction).get(operationTimeoutSec, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
@@ -97,11 +154,11 @@ public class BaseResources<T> {
         }
     }
 
-    public CompletableFuture<Void> setAsync(String path, Function<T, T> modifyFunction) {
+    protected CompletableFuture<Void> setAsync(String path, Function<T, T> modifyFunction) {
         return cache.readModifyUpdate(path, modifyFunction).thenApply(__ -> null);
     }
 
-    public void setWithCreate(String path, Function<Optional<T>, T> createFunction) throws MetadataStoreException {
+    protected void setWithCreate(String path, Function<Optional<T>, T> createFunction) throws MetadataStoreException {
         try {
             setWithCreateAsync(path, createFunction).get(operationTimeoutSec, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
@@ -112,11 +169,11 @@ public class BaseResources<T> {
         }
     }
 
-    public CompletableFuture<Void> setWithCreateAsync(String path, Function<Optional<T>, T> createFunction) {
+    protected CompletableFuture<Void> setWithCreateAsync(String path, Function<Optional<T>, T> createFunction) {
         return cache.readModifyUpdateOrCreate(path, createFunction).thenApply(__ -> null);
     }
 
-    public void create(String path, T data) throws MetadataStoreException {
+    protected void create(String path, T data) throws MetadataStoreException {
         try {
             createAsync(path, data).get(operationTimeoutSec, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
@@ -127,11 +184,11 @@ public class BaseResources<T> {
         }
     }
 
-    public CompletableFuture<Void> createAsync(String path, T data) {
+    protected CompletableFuture<Void> createAsync(String path, T data) {
         return cache.create(path, data);
     }
 
-    public void delete(String path) throws MetadataStoreException {
+    protected void delete(String path) throws MetadataStoreException {
         try {
             deleteAsync(path).get(operationTimeoutSec, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
@@ -142,13 +199,31 @@ public class BaseResources<T> {
         }
     }
 
-    public CompletableFuture<Void> deleteAsync(String path) {
+    protected CompletableFuture<Void> deleteAsync(String path) {
         return cache.delete(path);
     }
 
-    public boolean exists(String path) throws MetadataStoreException {
+    protected CompletableFuture<Void> deleteIfExistsAsync(String path) {
+        log.info("Deleting path: {}", path);
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        cache.delete(path).whenComplete((ignore, ex) -> {
+            if (ex != null && ex.getCause() instanceof MetadataStoreException.NotFoundException) {
+                log.info("Path {} did not exist in metadata store", path);
+                future.complete(null);
+            } else if (ex != null) {
+                log.info("Failed to delete path from metadata store: {}", path, ex);
+                future.completeExceptionally(ex);
+            } else {
+                log.info("Deleted path from metadata store: {}", path);
+                future.complete(null);
+            }
+        });
+        return future;
+    }
+
+    protected boolean exists(String path) throws MetadataStoreException {
         try {
-            return existsAsync(path).get(operationTimeoutSec, TimeUnit.SECONDS);
+            return cache.exists(path).get(operationTimeoutSec, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
             throw (e.getCause() instanceof MetadataStoreException) ? (MetadataStoreException) e.getCause()
                     : new MetadataStoreException(e.getCause());
@@ -157,11 +232,17 @@ public class BaseResources<T> {
         }
     }
 
+    protected CompletableFuture<Boolean> existsAsync(String path) {
+        return cache.exists(path);
+    }
+
     public int getOperationTimeoutSec() {
         return operationTimeoutSec;
     }
 
-    public CompletableFuture<Boolean> existsAsync(String path) {
-        return cache.exists(path);
+    protected static String joinPath(String... parts) {
+        StringBuilder sb = new StringBuilder();
+        Joiner.on('/').appendTo(sb, parts);
+        return sb.toString();
     }
 }

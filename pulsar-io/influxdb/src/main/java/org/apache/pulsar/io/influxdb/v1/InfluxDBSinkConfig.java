@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,14 +21,15 @@ package org.apache.pulsar.io.influxdb.v1;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.google.common.base.Preconditions;
-import lombok.Data;
-import lombok.experimental.Accessors;
-import org.apache.pulsar.io.core.annotations.FieldDoc;
-
 import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Map;
+import lombok.Data;
+import lombok.experimental.Accessors;
+import org.apache.pulsar.io.common.IOConfigUtils;
+import org.apache.pulsar.io.core.SinkContext;
+import org.apache.pulsar.io.core.annotations.FieldDoc;
 
 /**
  * Configuration class for the InfluxDB Sink Connector.
@@ -95,7 +96,7 @@ public class InfluxDBSinkConfig implements Serializable {
 
     @FieldDoc(
         required = false,
-        defaultValue = "1000L",
+        defaultValue = "1000",
         help = "The InfluxDB operation time in milliseconds")
     private long batchTimeMs = 1000L;
 
@@ -111,14 +112,11 @@ public class InfluxDBSinkConfig implements Serializable {
         return mapper.readValue(new File(yamlFile), InfluxDBSinkConfig.class);
     }
 
-    public static InfluxDBSinkConfig load(Map<String, Object> map) throws IOException {
-        ObjectMapper mapper = new ObjectMapper();
-        return mapper.readValue(new ObjectMapper().writeValueAsString(map), InfluxDBSinkConfig.class);
+    public static InfluxDBSinkConfig load(Map<String, Object> map, SinkContext sinkContext) throws IOException {
+        return IOConfigUtils.loadWithSecrets(map, InfluxDBSinkConfig.class, sinkContext);
     }
 
     public void validate() {
-        Preconditions.checkNotNull(influxdbUrl, "influxdbUrl property not set.");
-        Preconditions.checkNotNull(database, "database property not set.");
         Preconditions.checkArgument(batchSize > 0, "batchSize must be a positive integer.");
         Preconditions.checkArgument(batchTimeMs > 0, "batchTimeMs must be a positive long.");
     }

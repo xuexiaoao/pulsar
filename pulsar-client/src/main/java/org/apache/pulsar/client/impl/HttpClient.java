@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,9 @@
  */
 package org.apache.pulsar.client.impl;
 
+import io.netty.channel.EventLoopGroup;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponse;
 import java.io.Closeable;
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -28,32 +31,29 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-
-import io.netty.channel.EventLoopGroup;
-import io.netty.handler.codec.http.HttpRequest;
-import io.netty.handler.codec.http.HttpResponse;
-import io.netty.handler.ssl.SslContext;
-import javax.net.ssl.SSLContext;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
-
 import org.apache.pulsar.PulsarVersion;
 import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.client.api.AuthenticationDataProvider;
-import org.apache.pulsar.client.api.KeyStoreParams;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.PulsarClientException.NotFoundException;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
+import org.apache.pulsar.client.util.ExecutorProvider;
+import org.apache.pulsar.client.util.PulsarHttpAsyncSslEngineFactory;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
-import org.apache.pulsar.common.util.SecurityUtility;
-import org.apache.pulsar.common.util.keystoretls.KeyStoreSSLContext;
+import org.apache.pulsar.common.util.PulsarSslConfiguration;
+import org.apache.pulsar.common.util.PulsarSslFactory;
 import org.asynchttpclient.AsyncHttpClient;
 import org.asynchttpclient.AsyncHttpClientConfig;
 import org.asynchttpclient.BoundRequestBuilder;
 import org.asynchttpclient.DefaultAsyncHttpClient;
 import org.asynchttpclient.DefaultAsyncHttpClientConfig;
 import org.asynchttpclient.Request;
+import org.asynchttpclient.SslEngineFactory;
 import org.asynchttpclient.channel.DefaultKeepAliveStrategy;
-import org.asynchttpclient.netty.ssl.JsseSslEngineFactory;
 
 
 @Slf4j
@@ -65,6 +65,8 @@ public class HttpClient implements Closeable {
     protected final AsyncHttpClient httpClient;
     protected final ServiceNameResolver serviceNameResolver;
     protected final Authentication authentication;
+    protected ScheduledExecutorService executorService;
+    protected PulsarSslFactory sslFactory;
 
     protected HttpClient(ClientConfigurationData conf, EventLoopGroup eventLoopGroup) throws PulsarClientException {
         this.authentication = conf.getAuthentication();
@@ -72,6 +74,8 @@ public class HttpClient implements Closeable {
         this.serviceNameResolver.updateServiceUrl(conf.getServiceUrl());
 
         DefaultAsyncHttpClientConfig.Builder confBuilder = new DefaultAsyncHttpClientConfig.Builder();
+        confBuilder.setCookieStore(null);
+        confBuilder.setUseProxyProperties(true);
         confBuilder.setFollowRedirect(true);
         confBuilder.setMaxRedirects(conf.getMaxLookupRedirects());
         confBuilder.setConnectTimeout(DEFAULT_CONNECT_TIMEOUT_IN_SECONDS * 1000);
@@ -90,46 +94,29 @@ public class HttpClient implements Closeable {
         if ("https".equals(serviceNameResolver.getServiceUri().getServiceName())) {
             try {
                 // Set client key and certificate if available
-                AuthenticationDataProvider authData = authentication.getAuthData();
-
-                if (conf.isUseKeyStoreTls()) {
-                    SSLContext sslCtx = null;
-                    KeyStoreParams params = authData.hasDataForTls() ? authData.getTlsKeyStoreParams() : null;
-
-                    sslCtx = KeyStoreSSLContext.createClientSslContext(
-                            conf.getSslProvider(),
-                            params != null ? params.getKeyStoreType() : null,
-                            params != null ? params.getKeyStorePath() : null,
-                            params != null ? params.getKeyStorePassword() : null,
-                            conf.isTlsAllowInsecureConnection(),
-                            conf.getTlsTrustStoreType(),
-                            conf.getTlsTrustStorePath(),
-                            conf.getTlsTrustStorePassword(),
-                            conf.getTlsCiphers(),
-                            conf.getTlsProtocols());
-
-                    JsseSslEngineFactory sslEngineFactory = new JsseSslEngineFactory(sslCtx);
-                    confBuilder.setSslEngineFactory(sslEngineFactory);
-                } else {
-                    SslContext sslCtx = null;
-                    if (authData.hasDataForTls()) {
-                        sslCtx = authData.getTlsTrustStoreStream() == null
-                                ? SecurityUtility.createNettySslContextForClient(conf.isTlsAllowInsecureConnection(),
-                                        conf.getTlsTrustCertsFilePath(), authData.getTlsCertificates(),
-                                        authData.getTlsPrivateKey())
-                                : SecurityUtility.createNettySslContextForClient(conf.isTlsAllowInsecureConnection(),
-                                        authData.getTlsTrustStoreStream(), authData.getTlsCertificates(),
-                                        authData.getTlsPrivateKey());
-                    }
-                    else {
-                        sslCtx = SecurityUtility.createNettySslContextForClient(
-                                conf.isTlsAllowInsecureConnection(),
-                                conf.getTlsTrustCertsFilePath());
-                    }
-                    confBuilder.setSslContext(sslCtx);
+                this.executorService = Executors
+                        .newSingleThreadScheduledExecutor(new ExecutorProvider
+                                .ExtendedThreadFactory("httpclient-ssl-refresh"));
+                PulsarSslConfiguration sslConfiguration =
+                        buildSslConfiguration(conf, serviceNameResolver.resolveHostUri().getHost());
+                this.sslFactory = (PulsarSslFactory) Class.forName(conf.getSslFactoryPlugin())
+                        .getConstructor().newInstance();
+                this.sslFactory.initialize(sslConfiguration);
+                this.sslFactory.createInternalSslContext();
+                if (conf.getAutoCertRefreshSeconds() > 0) {
+                    this.executorService.scheduleWithFixedDelay(this::refreshSslContext,
+                            conf.getAutoCertRefreshSeconds(),
+                            conf.getAutoCertRefreshSeconds(), TimeUnit.SECONDS);
                 }
+                String hostname = conf.isTlsHostnameVerificationEnable() ? null : serviceNameResolver
+                        .resolveHostUri().getHost();
+                SslEngineFactory sslEngineFactory = new PulsarHttpAsyncSslEngineFactory(this.sslFactory, hostname);
+                confBuilder.setSslEngineFactory(sslEngineFactory);
+
+
 
                 confBuilder.setUseInsecureTrustManager(conf.isTlsAllowInsecureConnection());
+                confBuilder.setDisableHttpsEndpointIdentificationAlgorithm(!conf.isTlsHostnameVerificationEnable());
             } catch (Exception e) {
                 throw new PulsarClientException.InvalidConfigurationException(e);
             }
@@ -145,6 +132,10 @@ public class HttpClient implements Closeable {
         return this.serviceNameResolver.getServiceUrl();
     }
 
+    public InetSocketAddress resolveHost() {
+        return serviceNameResolver.resolveHost();
+    }
+
     void setServiceUrl(String serviceUrl) throws PulsarClientException {
         this.serviceNameResolver.updateServiceUrl(serviceUrl);
     }
@@ -152,6 +143,9 @@ public class HttpClient implements Closeable {
     @Override
     public void close() throws IOException {
         httpClient.close();
+        if (executorService != null) {
+            executorService.shutdownNow();
+        }
     }
 
     public <T> CompletableFuture<T> get(String path, Class<T> clazz) {
@@ -219,7 +213,8 @@ public class HttpClient implements Closeable {
                     }
 
                     try {
-                        T data = ObjectMapperFactory.getThreadLocal().readValue(response2.getResponseBodyAsBytes(), clazz);
+                        T data = ObjectMapperFactory.getMapper().reader().readValue(
+                                response2.getResponseBodyAsBytes(), clazz);
                         future.complete(data);
                     } catch (Exception e) {
                         log.warn("[{}] Error during HTTP get request: {}", requestUrl, e.getMessage());
@@ -237,5 +232,38 @@ public class HttpClient implements Closeable {
         }
 
         return future;
+    }
+
+    protected PulsarSslConfiguration buildSslConfiguration(ClientConfigurationData config, String host)
+            throws PulsarClientException {
+        return PulsarSslConfiguration.builder()
+                .tlsProvider(config.getSslProvider())
+                .tlsKeyStoreType(config.getTlsKeyStoreType())
+                .tlsKeyStorePath(config.getTlsKeyStorePath())
+                .tlsKeyStorePassword(config.getTlsKeyStorePassword())
+                .tlsTrustStoreType(config.getTlsTrustStoreType())
+                .tlsTrustStorePath(config.getTlsTrustStorePath())
+                .tlsTrustStorePassword(config.getTlsTrustStorePassword())
+                .tlsCiphers(config.getTlsCiphers())
+                .tlsProtocols(config.getTlsProtocols())
+                .tlsTrustCertsFilePath(config.getTlsTrustCertsFilePath())
+                .tlsCertificateFilePath(config.getTlsCertificateFilePath())
+                .tlsKeyFilePath(config.getTlsKeyFilePath())
+                .allowInsecureConnection(config.isTlsAllowInsecureConnection())
+                .requireTrustedClientCertOnConnect(false)
+                .tlsEnabledWithKeystore(config.isUseKeyStoreTls())
+                .tlsCustomParams(config.getSslFactoryPluginParams())
+                .authData(config.getAuthentication().getAuthData(host))
+                .serverMode(false)
+                .isHttps(true)
+                .build();
+    }
+
+    protected void refreshSslContext() {
+        try {
+            this.sslFactory.update();
+        } catch (Exception e) {
+            log.error("Failed to refresh SSL context", e);
+        }
     }
 }

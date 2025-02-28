@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,25 +18,30 @@
  */
 package org.apache.pulsar.client.api;
 
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
-
+import lombok.Cleanup;
 import org.apache.commons.compress.utils.IOUtils;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
+import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.impl.auth.AuthenticationTls;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
-
-import lombok.Cleanup;
 
 @Test(groups = "broker-api")
 public class TlsProducerConsumerTest extends TlsProducerConsumerBase {
@@ -147,9 +152,9 @@ public class TlsProducerConsumerTest extends TlsProducerConsumerBase {
                 .operationTimeout(1000, TimeUnit.MILLISECONDS);
         AtomicInteger index = new AtomicInteger(0);
 
-        ByteArrayInputStream certStream = createByteInputStream(TLS_CLIENT_CERT_FILE_PATH);
-        ByteArrayInputStream keyStream = createByteInputStream(TLS_CLIENT_KEY_FILE_PATH);
-        ByteArrayInputStream trustStoreStream = createByteInputStream(TLS_TRUST_CERT_FILE_PATH);
+        ByteArrayInputStream certStream = createByteInputStream(getTlsFileForClient("admin.cert"));
+        ByteArrayInputStream keyStream = createByteInputStream(getTlsFileForClient("admin.key-pk8"));
+        ByteArrayInputStream trustStoreStream = createByteInputStream(CA_CERT_FILE_PATH);
 
         Supplier<ByteArrayInputStream> certProvider = () -> getStream(index, certStream);
         Supplier<ByteArrayInputStream> keyProvider = () -> getStream(index, keyStream);
@@ -200,13 +205,14 @@ public class TlsProducerConsumerTest extends TlsProducerConsumerBase {
         log.info("-- Starting {} test --", methodName);
         ClientBuilder clientBuilder = PulsarClient.builder().serviceUrl(pulsar.getBrokerServiceUrlTls())
                 .enableTls(true).allowTlsInsecureConnection(false)
+                .autoCertRefreshSeconds(1)
                 .operationTimeout(1000, TimeUnit.MILLISECONDS);
         AtomicInteger certIndex = new AtomicInteger(1);
         AtomicInteger keyIndex = new AtomicInteger(0);
         AtomicInteger trustStoreIndex = new AtomicInteger(1);
-        ByteArrayInputStream certStream = createByteInputStream(TLS_CLIENT_CERT_FILE_PATH);
-        ByteArrayInputStream keyStream = createByteInputStream(TLS_CLIENT_KEY_FILE_PATH);
-        ByteArrayInputStream trustStoreStream = createByteInputStream(TLS_TRUST_CERT_FILE_PATH);
+        ByteArrayInputStream certStream = createByteInputStream(getTlsFileForClient("admin.cert"));
+        ByteArrayInputStream keyStream = createByteInputStream(getTlsFileForClient("admin.key-pk8"));
+        ByteArrayInputStream trustStoreStream = createByteInputStream(CA_CERT_FILE_PATH);
         Supplier<ByteArrayInputStream> certProvider = () -> getStream(certIndex, certStream,
                 keyStream/* invalid cert file */);
         Supplier<ByteArrayInputStream> keyProvider = () -> getStream(keyIndex, keyStream);
@@ -224,7 +230,7 @@ public class TlsProducerConsumerTest extends TlsProducerConsumerBase {
         } catch (PulsarClientException e) {
             // Ok..
         }
-
+        sleepSeconds(2);
         certIndex.set(0);
         try {
             consumer = pulsarClient.newConsumer().topic("persistent://my-property/use/my-ns/my-topic1")
@@ -233,8 +239,9 @@ public class TlsProducerConsumerTest extends TlsProducerConsumerBase {
         } catch (PulsarClientException e) {
             // Ok..
         }
-
+        sleepSeconds(2);
         trustStoreIndex.set(0);
+        sleepSeconds(2);
         consumer = pulsarClient.newConsumer().topic("persistent://my-property/use/my-ns/my-topic1")
                 .subscriptionName("my-subscriber-name").subscribe();
         consumer.close();
@@ -251,5 +258,110 @@ public class TlsProducerConsumerTest extends TlsProducerConsumerBase {
 
     private ByteArrayInputStream getStream(AtomicInteger index, ByteArrayInputStream... streams) {
         return streams[index.intValue()];
+    }
+
+    private final Authentication tlsAuth =
+        new AuthenticationTls(getTlsFileForClient("admin.cert"), getTlsFileForClient("admin.key-pk8"));
+
+    @DataProvider
+    public Object[] tlsTransport() {
+        Supplier<String> webServiceAddressTls = () -> pulsar.getWebServiceAddressTls();
+        Supplier<String> brokerServiceUrlTls = () -> pulsar.getBrokerServiceUrlTls();
+
+        return new Object[][]{
+                // Set TLS transport directly.
+                {webServiceAddressTls, null},
+                {brokerServiceUrlTls, null},
+                // Using TLS authentication data to set up TLS transport.
+                {webServiceAddressTls, tlsAuth},
+                {brokerServiceUrlTls, tlsAuth},
+        };
+    }
+
+    @Test(dataProvider = "tlsTransport")
+    public void testTlsTransport(Supplier<String> url, Authentication auth) throws Exception {
+        final String topicName = "persistent://my-property/my-ns/my-topic-1";
+
+        internalSetUpForNamespace();
+
+        ClientBuilder clientBuilder = PulsarClient.builder().serviceUrl(url.get())
+                .tlsTrustCertsFilePath(CA_CERT_FILE_PATH)
+                .allowTlsInsecureConnection(false)
+                .enableTlsHostnameVerification(false)
+                .authentication(auth);
+
+        if (auth == null) {
+            clientBuilder.tlsKeyFilePath(getTlsFileForClient("admin.key-pk8"))
+                    .tlsCertificateFilePath(getTlsFileForClient("admin.cert"));
+        }
+
+        @Cleanup
+        PulsarClient client = clientBuilder.build();
+
+        @Cleanup
+        Producer<byte[]> ignored = client.newProducer().topic(topicName).create();
+    }
+
+    @Test
+    public void testTlsWithFakeAuthentication() throws Exception {
+        Authentication authentication = spy(new Authentication() {
+            @Override
+            public String getAuthMethodName() {
+                return "fake";
+            }
+
+            @Override
+            public void configure(Map<String, String> authParams) {
+
+            }
+
+            @Override
+            public void start() {
+
+            }
+
+            @Override
+            public void close() {
+
+            }
+
+            @Override
+            public AuthenticationDataProvider getAuthData(String brokerHostName) {
+                return mock(AuthenticationDataProvider.class);
+            }
+        });
+
+        @Cleanup
+        PulsarAdmin pulsarAdmin = PulsarAdmin.builder()
+                .serviceHttpUrl(getPulsar().getWebServiceAddressTls())
+                .tlsTrustCertsFilePath(CA_CERT_FILE_PATH)
+                .allowTlsInsecureConnection(false)
+                .enableTlsHostnameVerification(false)
+                .tlsKeyFilePath(getTlsFileForClient("admin.key-pk8"))
+                .tlsCertificateFilePath(getTlsFileForClient("admin.cert"))
+                .authentication(authentication)
+                .build();
+        pulsarAdmin.tenants().getTenants();
+        verify(authentication, never()).getAuthData();
+
+        @Cleanup
+        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(getPulsar().getBrokerServiceUrlTls())
+                .tlsTrustCertsFilePath(CA_CERT_FILE_PATH)
+                .allowTlsInsecureConnection(false)
+                .enableTlsHostnameVerification(false)
+                .tlsKeyFilePath(getTlsFileForClient("admin.key-pk8"))
+                .tlsCertificateFilePath(getTlsFileForClient("admin.cert"))
+                .authentication(authentication).build();
+        verify(authentication, never()).getAuthData();
+
+        final String topicName = "persistent://my-property/my-ns/my-topic-1";
+        internalSetUpForNamespace();
+        @Cleanup
+        Consumer<byte[]> ignoredConsumer =
+                pulsarClient.newConsumer().topic(topicName).subscriptionName("my-subscriber-name").subscribe();
+        verify(authentication, never()).getAuthData();
+        @Cleanup
+        Producer<byte[]> ignoredProducer = pulsarClient.newProducer().topic(topicName).create();
+        verify(authentication, never()).getAuthData();
     }
 }

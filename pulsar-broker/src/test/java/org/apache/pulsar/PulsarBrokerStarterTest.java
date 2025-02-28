@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -22,18 +22,25 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
-
 import com.google.common.collect.Sets;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
+import java.io.PrintStream;
 import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.Arrays;
+import lombok.Cleanup;
+import org.apache.pulsar.PulsarBrokerStarter.BrokerStarter;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.testng.annotations.Test;
+import picocli.CommandLine.Option;
 
 @Test(groups = "broker")
 public class PulsarBrokerStarterTest {
@@ -44,8 +51,8 @@ public class PulsarBrokerStarterTest {
             testConfigFile.delete();
         }
         PrintWriter printWriter = new PrintWriter(new OutputStreamWriter(new FileOutputStream(testConfigFile)));
-        printWriter.println("zookeeperServers=z1.example.com,z2.example.com,z3.example.com");
-        printWriter.println("configurationStoreServers=gz1.example.com,gz2.example.com,gz3.example.com/foo");
+        printWriter.println("metadataStoreUrl=zk:z1.example.com,z2.example.com,z3.example.com");
+        printWriter.println("configurationMetadataStoreUrl=zk:gz1.example.com,gz2.example.com,gz3.example.com/foo");
         printWriter.println("brokerDeleteInactiveTopicsEnabled=false");
         printWriter.println("statusFilePath=/tmp/status.html");
         printWriter.println("managedLedgerDefaultEnsembleSize=1");
@@ -100,8 +107,9 @@ public class PulsarBrokerStarterTest {
 
         assertTrue(returnValue instanceof ServiceConfiguration);
         ServiceConfiguration serviceConfig = (ServiceConfiguration) returnValue;
-        assertEquals(serviceConfig.getZookeeperServers(), "z1.example.com,z2.example.com,z3.example.com");
-        assertEquals(serviceConfig.getConfigurationStoreServers(), "gz1.example.com,gz2.example.com,gz3.example.com/foo");
+        assertEquals(serviceConfig.getMetadataStoreUrl(), "zk:z1.example.com,z2.example.com,z3.example.com");
+        assertEquals(serviceConfig.getConfigurationMetadataStoreUrl(), "zk:gz1.example.com,gz2.example.com,gz3.example"
+                + ".com/foo");
         assertFalse(serviceConfig.isBrokerDeleteInactiveTopicsEnabled());
         assertEquals(serviceConfig.getStatusFilePath(), "/tmp/status.html");
         assertEquals(serviceConfig.getBacklogQuotaDefaultLimitGB(), 18);
@@ -117,7 +125,7 @@ public class PulsarBrokerStarterTest {
         assertTrue(serviceConfig.isBacklogQuotaCheckEnabled());
         assertEquals(serviceConfig.getManagedLedgerDefaultMarkDeleteRateLimit(), 5.0);
         assertEquals(serviceConfig.getReplicationProducerQueueSize(), 50);
-        assertFalse(serviceConfig.isReplicationMetricsEnabled());
+        assertTrue(serviceConfig.isReplicationMetricsEnabled());
         assertTrue(serviceConfig.isBookkeeperClientHealthCheckEnabled());
         assertEquals(serviceConfig.getBookkeeperClientHealthCheckErrorThresholdPerInterval(), 5);
         assertTrue(serviceConfig.isBookkeeperClientRackawarePolicyEnabled());
@@ -174,7 +182,7 @@ public class PulsarBrokerStarterTest {
         }
 
         PrintWriter printWriter = new PrintWriter(new OutputStreamWriter(new FileOutputStream(testConfigFile)));
-        printWriter.println("zookeeperServers=z1.example.com,z2.example.com,z3.example.com");
+        printWriter.println("metadataStoreUrl=zk:z1.example.com,z2.example.com,z3.example.com");
         printWriter.println("statusFilePath=/usr/share/pulsar_broker/status.html");
         printWriter.println("clusterName=test");
         printWriter.println("managedLedgerDefaultEnsembleSize=1");
@@ -222,8 +230,8 @@ public class PulsarBrokerStarterTest {
             testConfigFile.delete();
         }
         PrintWriter printWriter = new PrintWriter(new OutputStreamWriter(new FileOutputStream(testConfigFile)));
-        printWriter.println("zookeeperServers=z1.example.com,z2.example.com,z3.example.com");
-        printWriter.println("configurationStoreServers=");
+        printWriter.println("metadataStoreUrl=zk:z1.example.com,z2.example.com,z3.example.com");
+        printWriter.println("configurationMetadataStoreUrl=");
         printWriter.println("brokerDeleteInactiveTopicsEnabled=false");
         printWriter.println("statusFilePath=/tmp/status.html");
         printWriter.println("managedLedgerDefaultEnsembleSize=1");
@@ -253,8 +261,9 @@ public class PulsarBrokerStarterTest {
 
         assertTrue(returnValue instanceof ServiceConfiguration);
         ServiceConfiguration serviceConfig = (ServiceConfiguration) returnValue;
-        assertEquals(serviceConfig.getZookeeperServers(), "z1.example.com,z2.example.com,z3.example.com");
-        assertEquals(serviceConfig.getConfigurationStoreServers(), "z1.example.com,z2.example.com,z3.example.com");
+        assertEquals(serviceConfig.getMetadataStoreUrl(), "zk:z1.example.com,z2.example.com,z3.example.com");
+        assertEquals(serviceConfig.getConfigurationMetadataStoreUrl(), "zk:z1.example.com,z2.example.com,z3.example"
+                + ".com");
         assertFalse(serviceConfig.isBrokerDeleteInactiveTopicsEnabled());
         assertEquals(serviceConfig.getStatusFilePath(), "/tmp/status.html");
         assertEquals(serviceConfig.getBacklogQuotaDefaultLimitGB(), 18);
@@ -274,12 +283,14 @@ public class PulsarBrokerStarterTest {
      */
     @Test
     public void testMainWithNoArgument() throws Exception {
-        try {
-            PulsarBrokerStarter.main(new String[0]);
-            fail("No argument to main should've raised FileNotFoundException for no broker config!");
-        } catch (FileNotFoundException e) {
-            // code should reach here.
-        }
+        BrokerStarter brokerStarter = new BrokerStarter();
+        @Cleanup
+        StringWriter err = new StringWriter();
+        @Cleanup
+        PrintWriter printWriter = new PrintWriter(err);
+        brokerStarter.getCommander().setErr(printWriter);
+        assertEquals(brokerStarter.start(new String[0]), 1);
+        assertTrue(err.toString().contains("FileNotFoundException"));
     }
 
     /**
@@ -288,16 +299,16 @@ public class PulsarBrokerStarterTest {
      */
     @Test
     public void testMainRunBookieAndAutoRecoveryNoConfig() throws Exception {
-        try {
-            File testConfigFile = createValidBrokerConfigFile();
-            String[] args = {"-c", testConfigFile.getAbsolutePath(), "-rb", "-ra", "-bc", ""};
-            PulsarBrokerStarter.main(args);
-            fail("No Config file for bookie auto recovery should've raised IllegalArgumentException!");
-        } catch (IllegalArgumentException e) {
-            // code should reach here.
-            e.printStackTrace();
-            assertEquals(e.getMessage(), "No configuration file for Bookie");
-        }
+        File testConfigFile = createValidBrokerConfigFile();
+        String[] args = {"-c", testConfigFile.getAbsolutePath(), "-rb", "-ra", "-bc", ""};
+        BrokerStarter starter = new BrokerStarter();
+        @Cleanup
+        StringWriter err = new StringWriter();
+        @Cleanup
+        PrintWriter printWriter = new PrintWriter(err);
+        starter.getCommander().setErr(printWriter);
+        assertEquals(starter.start(args), 1);
+        assertTrue(err.toString().contains("No configuration file for Bookie"));
     }
 
     /**
@@ -306,15 +317,16 @@ public class PulsarBrokerStarterTest {
      */
     @Test
     public void testMainRunBookieRecoveryNoConfig() throws Exception {
-        try {
-            File testConfigFile = createValidBrokerConfigFile();
-            String[] args = {"-c", testConfigFile.getAbsolutePath(), "-ra", "-bc", ""};
-            PulsarBrokerStarter.main(args);
-            fail("No Config file for bookie auto recovery should've raised IllegalArgumentException!");
-        } catch (IllegalArgumentException e) {
-            // code should reach here.
-            assertEquals(e.getMessage(), "No configuration file for Bookie");
-        }
+        File testConfigFile = createValidBrokerConfigFile();
+        String[] args = {"-c", testConfigFile.getAbsolutePath(), "-ra", "-bc", ""};
+        BrokerStarter starter = new BrokerStarter();
+        @Cleanup
+        StringWriter err = new StringWriter();
+        @Cleanup
+        PrintWriter printWriter = new PrintWriter(err);
+        starter.getCommander().setErr(printWriter);
+        assertEquals(starter.start(args), 1);
+        assertTrue(err.toString().contains("No configuration file for Bookie"));
     }
 
     /**
@@ -322,15 +334,16 @@ public class PulsarBrokerStarterTest {
      */
     @Test
     public void testMainRunBookieNoConfig() throws Exception {
-        try {
-            File testConfigFile = createValidBrokerConfigFile();
-            String[] args = {"-c", testConfigFile.getAbsolutePath(), "-rb", "-bc", ""};
-            PulsarBrokerStarter.main(args);
-            fail("No Config file for bookie should've raised IllegalArgumentException!");
-        } catch (IllegalArgumentException e) {
-            // code should reach here
-            assertEquals(e.getMessage(), "No configuration file for Bookie");
-        }
+        File testConfigFile = createValidBrokerConfigFile();
+        String[] args = {"-c", testConfigFile.getAbsolutePath(), "-rb", "-bc", ""};
+        BrokerStarter starter = new BrokerStarter();
+        @Cleanup
+        StringWriter err = new StringWriter();
+        @Cleanup
+        PrintWriter printWriter = new PrintWriter(err);
+        starter.getCommander().setErr(printWriter);
+        assertEquals(starter.start(args), 1);
+        assertTrue(err.toString().contains("No configuration file for Bookie"));
     }
 
     /**
@@ -338,13 +351,43 @@ public class PulsarBrokerStarterTest {
      */
     @Test
     public void testMainEnableRunBookieThroughBrokerConfig() throws Exception {
+        File testConfigFile = createValidBrokerConfigFile();
+        String[] args = {"-c", testConfigFile.getAbsolutePath()};
+        BrokerStarter starter = new BrokerStarter();
+        @Cleanup
+        StringWriter err = new StringWriter();
+        @Cleanup
+        PrintWriter printWriter = new PrintWriter(err);
+        starter.getCommander().setErr(printWriter);
+        assertEquals(starter.start(args), 1);
+        assertTrue(err.toString().contains("IllegalArgumentException"));
+    }
+
+    @Test
+    public void testMainGenerateDocs() throws Exception {
+        PrintStream oldStream = System.out;
         try {
-            File testConfigFile = createValidBrokerConfigFile();
-            String[] args = {"-c", testConfigFile.getAbsolutePath()};
-            PulsarBrokerStarter.main(args);
-            fail("No argument to main should've raised IllegalArgumentException for no bookie config!");
-        } catch (IllegalArgumentException e) {
-            // code should reach here.
+            ByteArrayOutputStream baoStream = new ByteArrayOutputStream();
+            System.setOut(new PrintStream(baoStream));
+
+            Class argumentsClass = Class.forName("org.apache.pulsar.PulsarBrokerStarter$StarterArguments");
+            PulsarBrokerStarter.main(new String[]{"-g"});
+
+            String message = baoStream.toString();
+
+            Field[] fields = argumentsClass.getDeclaredFields();
+            for (Field field : fields) {
+                boolean fieldHasAnno = field.isAnnotationPresent(Option.class);
+                if (fieldHasAnno) {
+                    Option fieldAnno = field.getAnnotation(Option.class);
+                    String[] names = fieldAnno.names();
+                    String nameStr = Arrays.asList(names).toString();
+                    nameStr = nameStr.substring(1, nameStr.length() - 1);
+                    assertTrue(message.indexOf(nameStr) > 0);
+                }
+            }
+        } finally {
+            System.setOut(oldStream);
         }
     }
 }

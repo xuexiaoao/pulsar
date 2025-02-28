@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -20,11 +20,12 @@ package org.apache.pulsar.client.impl;
 
 
 import java.io.IOException;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
-
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.client.api.Consumer;
@@ -38,22 +39,28 @@ import org.apache.pulsar.client.api.ReaderListener;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SubscriptionMode;
 import org.apache.pulsar.client.api.SubscriptionType;
+import org.apache.pulsar.client.api.TopicMessageId;
 import org.apache.pulsar.client.impl.conf.ConsumerConfigurationData;
 import org.apache.pulsar.client.impl.conf.ReaderConfigurationData;
 import org.apache.pulsar.client.util.ExecutorProvider;
+import org.apache.pulsar.common.util.CompletableFutureCancellationHandler;
 
+@Slf4j
 public class MultiTopicsReaderImpl<T> implements Reader<T> {
 
     private final MultiTopicsConsumerImpl<T> multiTopicsConsumer;
 
     public MultiTopicsReaderImpl(PulsarClientImpl client, ReaderConfigurationData<T> readerConfiguration,
-                                 ExecutorProvider executorProvider, CompletableFuture<Consumer<T>> consumerFuture, Schema<T> schema) {
-        String subscription = "multiTopicsReader-" + DigestUtils.sha1Hex(UUID.randomUUID().toString()).substring(0, 10);
-        if (StringUtils.isNotBlank(readerConfiguration.getSubscriptionRolePrefix())) {
-            subscription = readerConfiguration.getSubscriptionRolePrefix() + "-" + subscription;
-        }
+                                 ExecutorProvider executorProvider, CompletableFuture<Consumer<T>> consumerFuture,
+                                 Schema<T> schema) {
+        String subscription;
         if (StringUtils.isNotBlank(readerConfiguration.getSubscriptionName())) {
             subscription = readerConfiguration.getSubscriptionName();
+        } else {
+            subscription = "multiTopicsReader-" + DigestUtils.sha1Hex(UUID.randomUUID().toString()).substring(0, 10);
+            if (StringUtils.isNotBlank(readerConfiguration.getSubscriptionRolePrefix())) {
+                subscription = readerConfiguration.getSubscriptionRolePrefix() + "-" + subscription;
+            }
         }
         ConsumerConfigurationData<T> consumerConfiguration = new ConsumerConfigurationData<>();
         consumerConfiguration.getTopicNames().addAll(readerConfiguration.getTopicNames());
@@ -62,6 +69,14 @@ public class MultiTopicsReaderImpl<T> implements Reader<T> {
         consumerConfiguration.setSubscriptionMode(SubscriptionMode.NonDurable);
         consumerConfiguration.setReceiverQueueSize(readerConfiguration.getReceiverQueueSize());
         consumerConfiguration.setReadCompacted(readerConfiguration.isReadCompacted());
+        consumerConfiguration.setPoolMessages(readerConfiguration.isPoolMessages());
+
+        // chunking configuration
+        consumerConfiguration.setMaxPendingChunkedMessage(readerConfiguration.getMaxPendingChunkedMessage());
+        consumerConfiguration.setAutoAckOldestChunkedMessageOnQueueFull(
+                readerConfiguration.isAutoAckOldestChunkedMessageOnQueueFull());
+        consumerConfiguration.setExpireTimeOfIncompleteChunkedMessageMillis(
+                readerConfiguration.getExpireTimeOfIncompleteChunkedMessageMillis());
 
         if (readerConfiguration.getReaderListener() != null) {
             ReaderListener<T> readerListener = readerConfiguration.getReaderListener();
@@ -70,8 +85,13 @@ public class MultiTopicsReaderImpl<T> implements Reader<T> {
 
                 @Override
                 public void received(Consumer<T> consumer, Message<T> msg) {
+                    final MessageId messageId = msg.getMessageId();
                     readerListener.received(MultiTopicsReaderImpl.this, msg);
-                    consumer.acknowledgeCumulativeAsync(msg);
+                    consumer.acknowledgeCumulativeAsync(messageId).exceptionally(ex -> {
+                        log.error("[{}][{}] auto acknowledge message {} cumulative fail.", getTopic(),
+                                getMultiTopicsConsumer().getSubscription(), messageId, ex);
+                        return null;
+                    });
                 }
 
                 @Override
@@ -91,6 +111,10 @@ public class MultiTopicsReaderImpl<T> implements Reader<T> {
         if (readerConfiguration.getCryptoKeyReader() != null) {
             consumerConfiguration.setCryptoKeyReader(readerConfiguration.getCryptoKeyReader());
         }
+
+        if (readerConfiguration.getMessageCrypto() != null) {
+            consumerConfiguration.setMessageCrypto(readerConfiguration.getMessageCrypto());
+        }
         if (readerConfiguration.getKeyHashRanges() != null) {
             consumerConfiguration.setKeySharedPolicy(
                     KeySharedPolicy
@@ -98,8 +122,19 @@ public class MultiTopicsReaderImpl<T> implements Reader<T> {
                             .ranges(readerConfiguration.getKeyHashRanges())
             );
         }
-        multiTopicsConsumer = new MultiTopicsConsumerImpl<>(client, consumerConfiguration, executorProvider, consumerFuture, schema,
-                null, true, readerConfiguration.getStartMessageId(), readerConfiguration.getStartMessageFromRollbackDurationInSec());
+        if (readerConfiguration.isAutoUpdatePartitions()) {
+            consumerConfiguration.setAutoUpdatePartitionsIntervalSeconds(
+                    readerConfiguration.getAutoUpdatePartitionsIntervalSeconds()
+            );
+        }
+
+        ConsumerInterceptors<T> consumerInterceptors =
+                ReaderInterceptorUtil.convertToConsumerInterceptors(
+                        this, readerConfiguration.getReaderInterceptorList());
+        multiTopicsConsumer = new MultiTopicsConsumerImpl<>(client, consumerConfiguration, executorProvider,
+                consumerFuture, schema, consumerInterceptors, true,
+                readerConfiguration.getStartMessageId(),
+                readerConfiguration.getStartMessageFromRollbackDurationInSec());
     }
 
     @Override
@@ -123,10 +158,20 @@ public class MultiTopicsReaderImpl<T> implements Reader<T> {
 
     @Override
     public CompletableFuture<Message<T>> readNextAsync() {
-        return multiTopicsConsumer.receiveAsync().thenApply(msg -> {
-            multiTopicsConsumer.acknowledgeCumulativeAsync(msg);
+        CompletableFuture<Message<T>> originalFuture = multiTopicsConsumer.receiveAsync();
+        CompletableFuture<Message<T>> result = originalFuture.thenApply(msg -> {
+            multiTopicsConsumer.acknowledgeCumulativeAsync(msg)
+                    .exceptionally(ex -> {
+                        log.warn("[{}][{}] acknowledge message {} cumulative fail.", getTopic(),
+                                getMultiTopicsConsumer().getSubscription(), msg.getMessageId(), ex);
+                        return null;
+                    });
             return msg;
         });
+        CompletableFutureCancellationHandler handler = new CompletableFutureCancellationHandler();
+        handler.attachToFuture(result);
+        handler.setCancelAction(() -> originalFuture.cancel(false));
+        return result;
     }
 
     @Override
@@ -141,7 +186,7 @@ public class MultiTopicsReaderImpl<T> implements Reader<T> {
 
     @Override
     public boolean hasMessageAvailable() throws PulsarClientException {
-        return multiTopicsConsumer.hasMessageAvailable() || multiTopicsConsumer.numMessagesInQueue() > 0;
+        return multiTopicsConsumer.hasMessageAvailable();
     }
 
     @Override
@@ -191,5 +236,15 @@ public class MultiTopicsReaderImpl<T> implements Reader<T> {
 
     public MultiTopicsConsumerImpl<T> getMultiTopicsConsumer() {
         return multiTopicsConsumer;
+    }
+
+    @Override
+    public List<TopicMessageId> getLastMessageIds() throws PulsarClientException {
+        return multiTopicsConsumer.getLastMessageIds();
+    }
+
+    @Override
+    public CompletableFuture<List<TopicMessageId>> getLastMessageIdsAsync() {
+        return multiTopicsConsumer.getLastMessageIdsAsync();
     }
 }

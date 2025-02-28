@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,7 +18,11 @@
  */
 package org.apache.pulsar.client.api;
 
+import io.opentelemetry.api.OpenTelemetry;
+import java.io.Serializable;
+import java.net.InetSocketAddress;
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -33,7 +37,7 @@ import org.apache.pulsar.common.classification.InterfaceStability;
  */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
-public interface ClientBuilder extends Cloneable {
+public interface ClientBuilder extends Serializable, Cloneable {
 
     /**
      * Construct the final {@link PulsarClient} instance.
@@ -123,6 +127,14 @@ public interface ClientBuilder extends Cloneable {
      * @return the client builder instance
      */
     ClientBuilder listenerName(String name);
+
+    /**
+     * Release the connection if it is not used for more than {@param connectionMaxIdleSeconds} seconds.
+     * Defaults to 25 seconds.
+     *
+     * @return the client builder instance
+     */
+    ClientBuilder connectionMaxIdleSeconds(int connectionMaxIdleSeconds);
 
     /**
      * Set the authentication provider to use in the Pulsar client instance.
@@ -217,7 +229,27 @@ public interface ClientBuilder extends Cloneable {
     ClientBuilder operationTimeout(int operationTimeout, TimeUnit unit);
 
     /**
-     * Set the number of threads to be used for handling connections to brokers <i>(default: 1 thread)</i>.
+     * Set lookup timeout <i>(default: matches operation timeout)</i>
+     *
+     * <p>
+     * Lookup operations have a different load pattern to other operations.
+     * They can be handled by any broker, are not proportional to throughput,
+     * and are harmless to retry. Given this, it makes sense to allow them to
+     * retry longer than normal operation, especially if they experience a timeout.
+     *
+     * <p>
+     * By default, this is set to match operation timeout. This is to maintain legacy behaviour.
+     * However, in practice it should be set to 5-10x the operation timeout.
+     *
+     * @param lookupTimeout lookup timeout
+     * @param unit time unit for {@code lookupTimeout}
+     * @return the client builder instance
+     */
+    ClientBuilder lookupTimeout(int lookupTimeout, TimeUnit unit);
+
+    /**
+     * Set the number of threads to be used for handling connections to brokers
+     * <i>(default: Runtime.getRuntime().availableProcessors())</i>.
      *
      * @param numIoThreads the number of IO threads
      * @return the client builder instance
@@ -225,11 +257,12 @@ public interface ClientBuilder extends Cloneable {
     ClientBuilder ioThreads(int numIoThreads);
 
     /**
-     * Set the number of threads to be used for message listeners <i>(default: 1 thread)</i>.
+     * Set the number of threads to be used for message listeners
+     * <i>(default: Runtime.getRuntime().availableProcessors())</i>.
      *
      * <p>The listener thread pool is shared across all the consumers and readers that are
-     * using a "listener" model to get messages. For a given consumer, the listener will be
-     * always invoked from the same thread, to ensure ordering.
+     * using a "listener" model to get messages. For a given consumer, the listener will
+     * always be invoked from the same thread, to ensure ordering.
      *
      * @param numListenerThreads the number of listener threads
      * @return the client builder instance
@@ -243,7 +276,7 @@ public interface ClientBuilder extends Cloneable {
      * Increasing this parameter may improve throughput when using many producers over a high latency connection.
      *
      * @param connectionsPerBroker
-     *            max number of connections per broker (needs to be greater than 0)
+     *            max number of connections per broker (needs to be greater than or equal to 0)
      * @return the client builder instance
      */
     ClientBuilder connectionsPerBroker(int connectionsPerBroker);
@@ -273,6 +306,22 @@ public interface ClientBuilder extends Cloneable {
      */
     @Deprecated
     ClientBuilder enableTls(boolean enableTls);
+
+    /**
+     * Set the path to the TLS key file.
+     *
+     * @param tlsKeyFilePath
+     * @return the client builder instance
+     */
+    ClientBuilder tlsKeyFilePath(String tlsKeyFilePath);
+
+    /**
+     * Set the path to the TLS certificate file.
+     *
+     * @param tlsCertificateFilePath
+     * @return the client builder instance
+     */
+    ClientBuilder tlsCertificateFilePath(String tlsCertificateFilePath);
 
     /**
      * Set the path to the trusted TLS certificate file.
@@ -321,6 +370,30 @@ public interface ClientBuilder extends Cloneable {
     ClientBuilder sslProvider(String sslProvider);
 
     /**
+     * The file format of the key store file.
+     *
+     * @param tlsKeyStoreType
+     * @return the client builder instance
+     */
+    ClientBuilder tlsKeyStoreType(String tlsKeyStoreType);
+
+    /**
+     * The location of the key store file.
+     *
+     * @param tlsTrustStorePath
+     * @return the client builder instance
+     */
+    ClientBuilder tlsKeyStorePath(String tlsTrustStorePath);
+
+    /**
+     * The store password for the key store file.
+     *
+     * @param tlsKeyStorePassword
+     * @return the client builder instance
+     */
+    ClientBuilder tlsKeyStorePassword(String tlsKeyStorePassword);
+
+    /**
      * The file format of the trust store file.
      *
      * @param tlsTrustStoreType
@@ -366,9 +439,8 @@ public interface ClientBuilder extends Cloneable {
     ClientBuilder tlsProtocols(Set<String> tlsProtocols);
 
     /**
-     * Configure a limit on the amount of direct memory that will be allocated by this client instance.
-     * <p>
-     * <b>Note: at this moment this is only limiting the memory for producers.</b>
+     * Configure a limit on the amount of direct memory that will be allocated by this client instance
+     * <i>(default: 64 MB)</i>.
      * <p>
      * Setting this to 0 will disable the limit.
      *
@@ -389,7 +461,10 @@ public interface ClientBuilder extends Cloneable {
      * @param unit
      *            time unit for {@code statsInterval}
      * @return the client builder instance
+     *
+     * @deprecated @see {@link #openTelemetry(OpenTelemetry)}
      */
+    @Deprecated
     ClientBuilder statsInterval(long statsInterval, TimeUnit unit);
 
     /**
@@ -423,7 +498,7 @@ public interface ClientBuilder extends Cloneable {
     ClientBuilder maxLookupRedirects(int maxLookupRedirects);
 
     /**
-     * Set max number of broker-rejected requests in a certain time-frame (30 seconds) after which current connection
+     * Set max number of broker-rejected requests in a certain time-frame (60 seconds) after which current connection
      * will be closed and client creates a new connection that give chance to connect a different broker <i>(default:
      * 50)</i>.
      *
@@ -485,6 +560,24 @@ public interface ClientBuilder extends Cloneable {
     ClientBuilder enableBusyWait(boolean enableBusyWait);
 
     /**
+     * Configure OpenTelemetry for Pulsar Client
+     * <p>
+     * When you pass an OpenTelemetry instance, Pulsar client will emit metrics that can be exported in a variety
+     * of different methods.
+     * <p>
+     * Refer to <a href="https://opentelemetry.io/docs/languages/java/">OpenTelemetry Java SDK documentation</a> for
+     * how to configure OpenTelemetry and the metrics exporter.
+     * <p>
+     * By default, Pulsar client will use the {@link io.opentelemetry.api.GlobalOpenTelemetry} instance. If an
+     * OpenTelemetry JVM agent is configured, the metrics will be reported, otherwise the metrics will be
+     * completely disabled.
+     *
+     * @param openTelemetry the OpenTelemetry instance
+     * @return the client builder instance
+     */
+    ClientBuilder openTelemetry(io.opentelemetry.api.OpenTelemetry openTelemetry);
+
+    /**
      * The clock used by the pulsar client.
      *
      * <p>The clock is currently used by producer for setting publish timestamps.
@@ -506,7 +599,7 @@ public interface ClientBuilder extends Cloneable {
      *
      * @param proxyServiceUrl proxy service url
      * @param proxyProtocol   protocol to decide type of proxy routing eg: SNI-routing
-     * @return
+     * @return the client builder instance
      */
     ClientBuilder proxyServiceUrl(String proxyServiceUrl, ProxyProtocol proxyProtocol);
 
@@ -514,7 +607,76 @@ public interface ClientBuilder extends Cloneable {
      * If enable transaction, start the transactionCoordinatorClient with pulsar client.
      *
      * @param enableTransaction whether enable transaction feature
-     * @return
+     * @return the client builder instance
      */
     ClientBuilder enableTransaction(boolean enableTransaction);
+
+    /**
+     * Set dns lookup bind address and port.
+     * @param address dnsBindAddress
+     * @param port dnsBindPort
+     * @return the client builder instance
+     */
+    ClientBuilder dnsLookupBind(String address, int port);
+
+    /**
+     * Set dns lookup server addresses.
+     * @param addresses dnsServerAddresses
+     * @return the client builder instance
+     */
+    ClientBuilder dnsServerAddresses(List<InetSocketAddress> addresses);
+
+    /**
+     *  Set socks5 proxy address.
+     * @param socks5ProxyAddress
+     * @return the client builder instance
+     */
+    ClientBuilder socks5ProxyAddress(InetSocketAddress socks5ProxyAddress);
+
+    /**
+     *  Set socks5 proxy username.
+     * @param socks5ProxyUsername
+     * @return the client builder instance
+     */
+    ClientBuilder socks5ProxyUsername(String socks5ProxyUsername);
+
+    /**
+     *  Set socks5 proxy password.
+     * @param socks5ProxyPassword
+     * @return the client builder instance
+     */
+    ClientBuilder socks5ProxyPassword(String socks5ProxyPassword);
+
+    /**
+     * Set the SSL Factory Plugin for custom implementation to create SSL Context and SSLEngine.
+     * @param sslFactoryPlugin ssl factory class name
+     * @return the client builder instance
+     */
+    ClientBuilder sslFactoryPlugin(String sslFactoryPlugin);
+
+    /**
+     * Set the SSL Factory Plugin params for the ssl factory plugin to use.
+     * @param sslFactoryPluginParams Params in String format that will be inputted to the SSL Factory Plugin
+     * @return the client builder instance
+     */
+    ClientBuilder sslFactoryPluginParams(String sslFactoryPluginParams);
+
+    /**
+     * Set Cert Refresh interval in seconds.
+     * @param autoCertRefreshSeconds
+     * @return the client builder instance
+     */
+    ClientBuilder autoCertRefreshSeconds(int autoCertRefreshSeconds);
+
+    /**
+     * Set the properties used for topic lookup.
+     * <p>
+     * When the broker performs topic lookup, these lookup properties will be taken into consideration in a customized
+     * load manager.
+     * <p>
+     * Note: The lookup properties are only used in topic lookup when:
+     * - The protocol is binary protocol, i.e. the service URL starts with "pulsar://" or "pulsar+ssl://"
+     * - The `loadManagerClassName` config in broker is a class that implements the `ExtensibleLoadManager` interface
+     */
+    ClientBuilder lookupProperties(Map<String, String> properties);
 }

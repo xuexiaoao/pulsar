@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -81,11 +81,13 @@ public class SmokeTest extends TestRetrySupport {
 
     @Test
     public void checkAdmin() throws PulsarClientException, PulsarAdminException {
+        @Cleanup
         PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(pulsarContainer.getPulsarAdminUrl()).build();
         List<String> expectedNamespacesList = new ArrayList<>();
         expectedNamespacesList.add("public/default");
         expectedNamespacesList.add("public/functions");
         Assert.assertEquals(admin.namespaces().getNamespaces("public"), expectedNamespacesList);
+        admin.brokerStats().getLoadReport();
     }
 
     @Override

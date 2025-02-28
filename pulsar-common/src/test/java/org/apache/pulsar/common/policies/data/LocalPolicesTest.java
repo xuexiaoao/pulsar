@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -25,8 +25,8 @@ import static org.testng.Assert.assertNotEquals;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
-import com.google.common.base.Objects;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -76,16 +76,16 @@ public class LocalPolicesTest {
 
         @Override
         public int hashCode() {
-            return Objects.hashCode(bundles, bookieAffinityGroup);
+            return Objects.hash(bundles, bookieAffinityGroup);
         }
 
         @Override
         public boolean equals(Object obj) {
             if (obj instanceof LocalPolicies) {
                 LocalPolicies other = (LocalPolicies) obj;
-                return Objects.equal(bundles, other.bundles)
-                        && Objects.equal(bookieAffinityGroup, other.bookieAffinityGroup)
-                        && Objects.equal(namespaceAntiAffinityGroup, other.namespaceAntiAffinityGroup);
+                return Objects.equals(bundles, other.bundles)
+                        && Objects.equals(bookieAffinityGroup, other.bookieAffinityGroup)
+                        && Objects.equals(namespaceAntiAffinityGroup, other.namespaceAntiAffinityGroup);
             }
             return false;
         }
@@ -101,8 +101,8 @@ public class LocalPolicesTest {
         LocalPolicies immutableLocalPolicies = new LocalPolicies();
 
         // serialize and deserialize
-        byte[] data = ObjectMapperFactory.getThreadLocal().writeValueAsBytes(mutableLocalPolicies);
-        LocalPolicies mutableDeserializedPolicies = ObjectMapperFactory.getThreadLocal().readValue(data, LocalPolicies.class);
+        byte[] data = ObjectMapperFactory.getMapper().writer().writeValueAsBytes(mutableLocalPolicies);
+        LocalPolicies mutableDeserializedPolicies = ObjectMapperFactory.getMapper().reader().readValue(data, LocalPolicies.class);
 
         Assert.assertEquals(mutableDeserializedPolicies,immutableLocalPolicies);
 
@@ -121,8 +121,8 @@ public class LocalPolicesTest {
         LocalPolicies immutableLocalPolicies2 = new LocalPolicies(defaultBundle(),bookieAffinityGroupData,namespaceAntiAffinityGroup);
 
         // serialize and deserialize
-        data = ObjectMapperFactory.getThreadLocal().writeValueAsBytes(mutableLocalPolicies);
-        mutableDeserializedPolicies = ObjectMapperFactory.getThreadLocal().readValue(data, LocalPolicies.class);
+        data = ObjectMapperFactory.getMapper().writer().writeValueAsBytes(mutableLocalPolicies);
+        mutableDeserializedPolicies = ObjectMapperFactory.getMapper().reader().readValue(data, LocalPolicies.class);
 
         Assert.assertEquals(mutableDeserializedPolicies,immutableLocalPolicies2);
 
@@ -136,8 +136,8 @@ public class LocalPolicesTest {
         LocalPolicies immutableLocalPolicies = new LocalPolicies();
 
         // serialize and deserialize
-        String data = ObjectMapperFactory.getThreadLocal().writeValueAsString(mutableLocalPolicies);
-        LocalPolicies mutableDeserializedPolicies = ObjectMapperFactory.getThreadLocal().readValue(data, LocalPolicies.class);
+        String data = ObjectMapperFactory.getMapper().writer().writeValueAsString(mutableLocalPolicies);
+        LocalPolicies mutableDeserializedPolicies = ObjectMapperFactory.getMapper().reader().readValue(data, LocalPolicies.class);
 
         Assert.assertEquals(mutableDeserializedPolicies,immutableLocalPolicies);
 
@@ -156,8 +156,8 @@ public class LocalPolicesTest {
         LocalPolicies immutableLocalPolicies2 = new LocalPolicies(defaultBundle(),bookieAffinityGroupData,namespaceAntiAffinityGroup);
 
         // serialize and deserialize
-        data = ObjectMapperFactory.getThreadLocal().writeValueAsString(mutableLocalPolicies);
-        mutableDeserializedPolicies = ObjectMapperFactory.getThreadLocal().readValue(data, LocalPolicies.class);
+        data = ObjectMapperFactory.getMapper().writer().writeValueAsString(mutableLocalPolicies);
+        mutableDeserializedPolicies = ObjectMapperFactory.getMapper().reader().readValue(data, LocalPolicies.class);
 
         Assert.assertEquals(mutableDeserializedPolicies,immutableLocalPolicies2);
 

@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,9 +18,11 @@
  */
 package org.apache.pulsar.broker.service;
 
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import org.apache.pulsar.broker.service.BrokerServiceException.TopicPoliciesCacheNotInitException;
-import org.apache.pulsar.common.naming.NamespaceBundle;
+import org.apache.pulsar.broker.PulsarService;
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.TopicPolicies;
 import org.apache.pulsar.common.util.FutureUtil;
@@ -28,12 +30,21 @@ import org.apache.pulsar.common.util.FutureUtil;
 /**
  * Topic policies service.
  */
-public interface TopicPoliciesService {
+@InterfaceStability.Stable
+@InterfaceAudience.LimitedPrivate
+public interface TopicPoliciesService extends AutoCloseable {
 
     TopicPoliciesService DISABLED = new TopicPoliciesServiceDisabled();
 
     /**
-     * Update policies for a topic async.
+     * Delete policies for a topic asynchronously.
+     *
+     * @param topicName topic name
+     */
+    CompletableFuture<Void> deleteTopicPoliciesAsync(TopicName topicName);
+
+    /**
+     * Update policies for a topic asynchronously.
      *
      * @param topicName topic name
      * @param policies  policies for the topic name
@@ -41,58 +52,57 @@ public interface TopicPoliciesService {
     CompletableFuture<Void> updateTopicPoliciesAsync(TopicName topicName, TopicPolicies policies);
 
     /**
-     * Get policies for a topic async.
-     * @param topicName topic name
-     * @return future of the topic policies
+     * It controls the behavior of {@link TopicPoliciesService#getTopicPoliciesAsync}.
      */
-    TopicPolicies getTopicPolicies(TopicName topicName) throws TopicPoliciesCacheNotInitException;
+    enum GetType {
+        DEFAULT, // try getting the local topic policies, if not present, then get the global policies
+        GLOBAL_ONLY, // only get the global policies
+        LOCAL_ONLY,  // only get the local policies
+    }
 
     /**
-     * Get policies for a topic without cache async.
-     * @param topicName topic name
-     * @return future of the topic policies
+     * Retrieve the topic policies.
      */
-    CompletableFuture<TopicPolicies> getTopicPoliciesBypassCacheAsync(TopicName topicName);
-
-    /**
-     * Add owned namespace bundle async.
-     *
-     * @param namespaceBundle namespace bundle
-     */
-    CompletableFuture<Void> addOwnedNamespaceBundleAsync(NamespaceBundle namespaceBundle);
-
-    /**
-     * Remove owned namespace bundle async.
-     *
-     * @param namespaceBundle namespace bundle
-     */
-    CompletableFuture<Void> removeOwnedNamespaceBundleAsync(NamespaceBundle namespaceBundle);
+    CompletableFuture<Optional<TopicPolicies>> getTopicPoliciesAsync(TopicName topicName, GetType type);
 
     /**
      * Start the topic policy service.
      */
-    void start();
-
-    /**
-     * whether the cache has been initialized.
-     * @param topicName
-     * @return
-     */
-    boolean cacheIsInitialized(TopicName topicName);
-
-    void registerListener(TopicName topicName, TopicPolicyListener<TopicPolicies> listener);
-
-    void unregisterListener(TopicName topicName, TopicPolicyListener<TopicPolicies> listener);
-
-    /**
-     * clean cache and listeners in TopicPolicies and so on.
-     * @param topicName
-     */
-    default void clean(TopicName topicName) {
-        throw new UnsupportedOperationException("Clean is not supported by default");
+    default void start(PulsarService pulsar) {
     }
 
+    /**
+     * Close the resources if necessary.
+     */
+    default void close() throws Exception {
+    }
+
+    /**
+     * Registers a listener for topic policies updates.
+     *
+     * <p>
+     * The listener will receive the latest topic policies when they are updated. If the policies are removed, the
+     * listener will receive a null value. Note that not every update is guaranteed to trigger the listener. For
+     * instance, if the policies change from A -> B -> null -> C in quick succession, only the final state (C) is
+     * guaranteed to be received by the listener.
+     * In summary, the listener is guaranteed to receive only the latest value.
+     * </p>
+     *
+     * @return true if the listener is registered successfully
+     */
+    boolean registerListener(TopicName topicName, TopicPolicyListener listener);
+
+    /**
+     * Unregister the topic policies listener.
+     */
+    void unregisterListener(TopicName topicName, TopicPolicyListener listener);
+
     class TopicPoliciesServiceDisabled implements TopicPoliciesService {
+
+        @Override
+        public CompletableFuture<Void> deleteTopicPoliciesAsync(TopicName topicName) {
+            return CompletableFuture.completedFuture(null);
+        }
 
         @Override
         public CompletableFuture<Void> updateTopicPoliciesAsync(TopicName topicName, TopicPolicies policies) {
@@ -100,49 +110,17 @@ public interface TopicPoliciesService {
         }
 
         @Override
-        public TopicPolicies getTopicPolicies(TopicName topicName) throws TopicPoliciesCacheNotInitException {
-            return null;
+        public CompletableFuture<Optional<TopicPolicies>> getTopicPoliciesAsync(TopicName topicName, GetType type) {
+            return CompletableFuture.completedFuture(Optional.empty());
         }
 
         @Override
-        public CompletableFuture<TopicPolicies> getTopicPoliciesBypassCacheAsync(TopicName topicName) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public CompletableFuture<Void> addOwnedNamespaceBundleAsync(NamespaceBundle namespaceBundle) {
-            //No-op
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public CompletableFuture<Void> removeOwnedNamespaceBundleAsync(NamespaceBundle namespaceBundle) {
-            //No-op
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public void start() {
-            //No-op
-        }
-
-        @Override
-        public boolean cacheIsInitialized(TopicName topicName) {
+        public boolean registerListener(TopicName topicName, TopicPolicyListener listener) {
             return false;
         }
 
         @Override
-        public void registerListener(TopicName topicName, TopicPolicyListener<TopicPolicies> listener) {
-            //No-op
-        }
-
-        @Override
-        public void unregisterListener(TopicName topicName, TopicPolicyListener<TopicPolicies> listener) {
-            //No-op
-        }
-
-        @Override
-        public void clean(TopicName topicName) {
+        public void unregisterListener(TopicName topicName, TopicPolicyListener listener) {
             //No-op
         }
     }

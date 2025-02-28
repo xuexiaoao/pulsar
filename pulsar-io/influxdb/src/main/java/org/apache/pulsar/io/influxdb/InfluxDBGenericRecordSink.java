@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.io.influxdb;
 
+import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import lombok.val;
 import org.apache.pulsar.client.api.schema.GenericRecord;
@@ -29,10 +30,8 @@ import org.apache.pulsar.io.core.annotations.IOType;
 import org.apache.pulsar.io.influxdb.v2.InfluxDBSink;
 import org.apache.pulsar.io.influxdb.v2.InfluxDBSinkConfig;
 
-import java.util.Map;
-
 /**
- * Delegate for InfluxDB sinks, one for InfluxDB v1, the other for InfluxDB v2
+ * Delegate for InfluxDB sinks, one for InfluxDB v1, the other for InfluxDB v2.
  */
 @Connector(
         name = "influxdb",
@@ -47,12 +46,12 @@ public class InfluxDBGenericRecordSink implements Sink<GenericRecord> {
     @Override
     public void open(Map<String, Object> map, SinkContext sinkContext) throws Exception {
         try {
-            val configV2 = InfluxDBSinkConfig.load(map);
+            val configV2 = InfluxDBSinkConfig.load(map, sinkContext);
             configV2.validate();
             sink = new InfluxDBSink();
         } catch (Exception e) {
             try {
-                val configV1 = org.apache.pulsar.io.influxdb.v1.InfluxDBSinkConfig.load(map);
+                val configV1 = org.apache.pulsar.io.influxdb.v1.InfluxDBSinkConfig.load(map, sinkContext);
                 configV1.validate();
                 sink = new org.apache.pulsar.io.influxdb.v1.InfluxDBGenericRecordSink();
             } catch (Exception e1) {

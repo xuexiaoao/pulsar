@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,6 +21,7 @@ package org.apache.bookkeeper.mledger;
 import lombok.Data;
 import org.apache.bookkeeper.common.annotation.InterfaceAudience;
 import org.apache.bookkeeper.common.annotation.InterfaceStability;
+import org.apache.bookkeeper.mledger.proto.MLDataFormats;
 
 /**
  * Configuration for a {@link ManagedLedgerFactory}.
@@ -38,31 +39,47 @@ public class ManagedLedgerFactoryConfig {
      */
     private double cacheEvictionWatermark = 0.90;
 
-    private int numManagedLedgerWorkerThreads = Runtime.getRuntime().availableProcessors();
     private int numManagedLedgerSchedulerThreads = Runtime.getRuntime().availableProcessors();
 
     /**
-     * Frequency of cache eviction triggering. Default is 100 times per second.
+     * Interval of cache eviction triggering. Default is 10 ms times.
      */
-    private double cacheEvictionFrequency = 100;
+    private long cacheEvictionIntervalMs = 10;
 
     /**
-     * All entries that have stayed in cache for more than the configured time, will be evicted
+     * All entries that have stayed in cache for more than the configured time, will be evicted.
      */
     private long cacheEvictionTimeThresholdMillis = 1000;
 
     /**
-     * Whether we should make a copy of the entry payloads when inserting in cache
+     * Whether we should make a copy of the entry payloads when inserting in cache.
      */
     private boolean copyEntriesInCache = false;
 
     /**
-     * Whether trace managed ledger task execution time
+     * Maximum number of (estimated) data in-flight reading from storage and the cache.
+     */
+    private long managedLedgerMaxReadsInFlightSize = 0;
+
+    /**
+     * Maximum time to wait for acquiring permits for max reads in flight when managedLedgerMaxReadsInFlightSizeInMB is
+     * set (>0) and the limit is reached.
+     */
+    private long managedLedgerMaxReadsInFlightPermitsAcquireTimeoutMillis = 60000;
+
+    /**
+     * Maximum number of reads that can be queued for acquiring permits for max reads in flight when
+     * managedLedgerMaxReadsInFlightSizeInMB is set (>0) and the limit is reached.
+     */
+    private int managedLedgerMaxReadsInFlightPermitsAcquireQueueSize = 10000;
+
+    /**
+     * Whether trace managed ledger task execution time.
      */
     private boolean traceTaskExecution = true;
 
     /**
-     * Managed ledger prometheus stats Latency Rollover Seconds
+     * Managed ledger prometheus stats Latency Rollover Seconds.
      */
     private int prometheusStatsLatencyRolloverSeconds = 60;
 
@@ -72,7 +89,44 @@ public class ManagedLedgerFactoryConfig {
     private int cursorPositionFlushSeconds = 60;
 
     /**
-     * cluster name for prometheus stats
+     * How frequently to refresh the stats.
+     */
+    private int statsPeriodSeconds = 60;
+
+    /**
+     * cluster name for prometheus stats.
      */
     private String clusterName;
+
+    /**
+     * ManagedLedgerInfo compression type. If the compression type is null or invalid, don't compress data.
+     */
+    private String managedLedgerInfoCompressionType = MLDataFormats.CompressionType.NONE.name();
+
+    /**
+     * ManagedLedgerInfo compression threshold. If the origin metadata size below configuration.
+     * compression will not apply.
+     */
+    private long managedLedgerInfoCompressionThresholdInBytes = 0;
+
+    /**
+     * ManagedCursorInfo compression type. If the compression type is null or invalid, don't compress data.
+     */
+    private String managedCursorInfoCompressionType = MLDataFormats.CompressionType.NONE.name();
+
+    /**
+     * ManagedCursorInfo compression threshold. If the origin metadata size below configuration.
+     * compression will not apply.
+     */
+    private long managedCursorInfoCompressionThresholdInBytes = 0;
+
+    public MetadataCompressionConfig getCompressionConfigForManagedLedgerInfo() {
+        return new MetadataCompressionConfig(managedLedgerInfoCompressionType,
+                managedLedgerInfoCompressionThresholdInBytes);
+    }
+
+    public MetadataCompressionConfig getCompressionConfigForManagedCursorInfo() {
+        return new MetadataCompressionConfig(managedCursorInfoCompressionType,
+                managedCursorInfoCompressionThresholdInBytes);
+    }
 }

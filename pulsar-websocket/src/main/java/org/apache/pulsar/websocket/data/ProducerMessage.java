@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -20,10 +20,10 @@ package org.apache.pulsar.websocket.data;
 
 import java.util.List;
 import java.util.Map;
-
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.apache.pulsar.common.api.proto.CompressionType;
 
 /**
  * Class represent single message to be published.
@@ -70,4 +70,13 @@ public class ProducerMessage {
 
     // Base64 encoded serialized schema for payload
     public String valueSchema;
+
+    // Base64 encoded serialized initialization vector used when the client encrypts.
+    public String encryptionParam;
+
+    // Compression type. Do not set it if compression is not performed.
+    public CompressionType compressionType;
+
+    // The size of the payload before compression. Do not set it if compression is not performed.
+    public Integer uncompressedMessageSize;
 }

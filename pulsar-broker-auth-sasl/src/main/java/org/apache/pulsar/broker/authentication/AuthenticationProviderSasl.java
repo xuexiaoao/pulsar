@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -33,30 +33,39 @@ import static org.apache.pulsar.common.sasl.SaslConstants.SASL_STATE_COMPLETE;
 import static org.apache.pulsar.common.sasl.SaslConstants.SASL_STATE_NEGOTIATE;
 import static org.apache.pulsar.common.sasl.SaslConstants.SASL_STATE_SERVER;
 import static org.apache.pulsar.common.sasl.SaslConstants.SASL_STATE_SERVER_CHECK_TOKEN;
-
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import java.io.IOException;
 import java.net.SocketAddress;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.Random;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
-
 import javax.naming.AuthenticationException;
 import javax.net.ssl.SSLSession;
 import javax.security.auth.login.LoginException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-
-import com.google.common.collect.Maps;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.broker.ServiceConfiguration;
-import org.apache.pulsar.broker.authentication.metrics.AuthenticationMetrics;
 import org.apache.pulsar.common.api.AuthData;
 import org.apache.pulsar.common.sasl.JAASCredentialsContainer;
 import org.apache.pulsar.common.sasl.SaslConstants;
 
+/**
+ * Authentication Provider for SASL (Simple Authentication and Security Layer).
+ *
+ * Note: This provider does not override the default implementation for
+ * {@link AuthenticationProvider#authenticate(AuthenticationDataSource)}. As the Javadoc for the interface's method
+ * indicates, this method should only be implemented when using single stage authentication. In the case of this
+ * provider, the authentication is multi-stage.
+ */
 @Slf4j
 public class AuthenticationProviderSasl implements AuthenticationProvider {
 
@@ -65,10 +74,17 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
 
     private JAASCredentialsContainer jaasCredentialsContainer;
     private String loginContextName;
+    private Cache<Long, AuthenticationState> authStates;
 
     @Override
     public void initialize(ServiceConfiguration config) throws IOException {
-        this.configuration = Maps.newHashMap();
+        initialize(Context.builder().config(config).build());
+    }
+
+    @Override
+    public void initialize(Context context) throws IOException {
+        var config = context.getConfig();
+        this.configuration = new HashMap<>();
         final String allowedIdsPatternRegExp = config.getSaslJaasClientAllowedIds();
         configuration.put(JAAS_CLIENT_ALLOWED_IDS, allowedIdsPatternRegExp);
         configuration.put(JAAS_SERVER_SECTION_NAME, config.getSaslJaasServerSectionName());
@@ -77,41 +93,35 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
         try {
             this.allowedIdsPattern = Pattern.compile(allowedIdsPatternRegExp);
         } catch (PatternSyntaxException error) {
-            log.error("Invalid regular expression for id " + allowedIdsPatternRegExp, error);
+            log.error("Invalid regular expression for id {}", allowedIdsPatternRegExp, error);
             throw new IOException(error);
         }
 
         loginContextName = config.getSaslJaasServerSectionName();
         if (jaasCredentialsContainer == null) {
-            log.info("JAAS loginContext is: {}." , loginContextName);
+            log.info("JAAS loginContext is: {}.", loginContextName);
             try {
                 jaasCredentialsContainer = new JAASCredentialsContainer(
                     loginContextName,
                     new PulsarSaslServer.SaslServerCallbackHandler(allowedIdsPattern),
                     configuration);
             } catch (LoginException e) {
-                log.error("JAAS login in broker failed" , e);
+                log.error("JAAS login in broker failed", e);
                 throw new IOException(e);
             }
         }
-
-        this.signer = new SaslRoleTokenSigner(Long.toString(new Random().nextLong()).getBytes());
-    }
-
-    @Override
-    public String authenticate(AuthenticationDataSource authData) throws AuthenticationException {
-        try {
-            if (authData instanceof SaslAuthenticationDataSource) {
-                AuthenticationMetrics.authenticateSuccess(getClass().getSimpleName(), getAuthMethodName());
-                return ((SaslAuthenticationDataSource) authData).getAuthorizationID();
-            } else {
-                throw new AuthenticationException("Not support authDataSource type, expect sasl.");
-            }
-        } catch (AuthenticationException exception) {
-            AuthenticationMetrics.authenticateFailure(getClass().getSimpleName(), getAuthMethodName(), exception.getMessage());
-            throw exception;
+        String saslJaasServerRoleTokenSignerSecretPath = config.getSaslJaasServerRoleTokenSignerSecretPath();
+        byte[] secret = null;
+        if (StringUtils.isNotBlank(saslJaasServerRoleTokenSignerSecretPath)) {
+            secret = readSecretFromUrl(saslJaasServerRoleTokenSignerSecretPath);
+        } else {
+            String msg = "saslJaasServerRoleTokenSignerSecretPath parameter is empty";
+            throw new IllegalArgumentException(msg);
         }
-
+        this.signer = new SaslRoleTokenSigner(secret);
+        this.authStates = Caffeine.newBuilder()
+                .maximumSize(config.getMaxInflightSaslContext())
+                .expireAfterWrite(config.getInflightSaslContextExpiryMs(), TimeUnit.MILLISECONDS).build();
     }
 
     @Override
@@ -121,6 +131,10 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
 
     @Override
     public void close() throws IOException {
+        if (jaasCredentialsContainer != null) {
+            jaasCredentialsContainer.close();
+            jaasCredentialsContainer = null;
+        }
     }
 
     @Override
@@ -128,11 +142,10 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
                                             SocketAddress remoteAddress,
                                             SSLSession sslSession) throws AuthenticationException {
         try {
-            return new SaslAuthenticationState(
-                new SaslAuthenticationDataSource(
-                    new PulsarSaslServer(jaasCredentialsContainer.getSubject(), allowedIdsPattern)));
+            PulsarSaslServer server = new PulsarSaslServer(jaasCredentialsContainer.getSubject(), allowedIdsPattern);
+            return new SaslAuthenticationState(server);
         } catch (Throwable t) {
-            log.error("Failed create sasl auth state" , t);
+            log.error("Failed create sasl auth state", t);
             throw new AuthenticationException(t.getMessage());
         }
     }
@@ -188,7 +201,18 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
         return signed;
     }
 
-    private ConcurrentHashMap<Long, AuthenticationState> authStates = new ConcurrentHashMap<>();
+    private byte[] readSecretFromUrl(String secretConfUrl) throws IOException {
+        if (secretConfUrl.startsWith("file:")) {
+            URI filePath = URI.create(secretConfUrl);
+            return Files.readAllBytes(Paths.get(filePath));
+        } else if (Files.exists(Paths.get(secretConfUrl))) {
+            // Assume the key content was passed in a valid file path
+            return Files.readAllBytes(Paths.get(secretConfUrl));
+        } else {
+            String msg = "Role token signer secret file " + secretConfUrl + " doesn't exist";
+            throw new IllegalArgumentException(msg);
+        }
+    }
 
     // return authState if it is in cache.
     private AuthenticationState getAuthState(HttpServletRequest request) {
@@ -198,7 +222,7 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
         }
 
         try {
-            return authStates.get(Long.parseLong(id));
+            return authStates.getIfPresent(Long.parseLong(id));
         } catch (NumberFormatException e) {
             log.error("[{}] Wrong Id String in Token {}. e:", request.getRequestURI(),
                 id, e);
@@ -240,16 +264,18 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
                 request.setAttribute(AuthenticatedDataAttributeName,
                     new AuthenticationDataHttps(request));
                 if (log.isDebugEnabled()) {
-                    log.debug("[{}] Server side role token OK to go on: {}", request.getRequestURI(), saslAuthRoleToken);
+                    log.debug("[{}] Server side role token OK to go on: {}", request.getRequestURI(),
+                            saslAuthRoleToken);
                 }
                 return true;
             } else {
                 checkState(request.getHeader(SASL_HEADER_STATE).equalsIgnoreCase(SASL_STATE_SERVER_CHECK_TOKEN));
                 setResponseHeaderState(response, SASL_STATE_COMPLETE);
-                response.setHeader(SASL_STATE_SERVER, request.getHeader(SASL_STATE_SERVER));
+                response.setHeader(SASL_STATE_SERVER, sanitizeHeaderValue(request.getHeader(SASL_STATE_SERVER)));
                 response.setStatus(HttpServletResponse.SC_OK);
                 if (log.isDebugEnabled()) {
-                    log.debug("[{}] Server side role token verified success: {}", request.getRequestURI(), saslAuthRoleToken);
+                    log.debug("[{}] Server side role token verified success: {}", request.getRequestURI(),
+                            saslAuthRoleToken);
                 }
                 return false;
             }
@@ -283,7 +309,7 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
                 response.setStatus(HttpServletResponse.SC_OK);
 
                 // auth completed, no need to keep authState
-                authStates.remove(state.getStateId());
+                authStates.invalidate(state.getStateId());
                 return false;
             } else {
                 // auth not complete
@@ -298,5 +324,13 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
                 return false;
             }
         }
+    }
+
+    private String sanitizeHeaderValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        // Remove CRLF and other special characters
+        return value.replaceAll("[\\r\\n]", "").replaceAll("[^\\x20-\\x7E]", "");
     }
 }

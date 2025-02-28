@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,7 +19,15 @@
 package org.apache.bookkeeper.mledger.offload.filesystem.impl;
 
 
-import com.google.common.util.concurrent.MoreExecutors;
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
+import java.io.IOException;
+import java.net.URI;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.UUID;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.LedgerHandle;
 import org.apache.bookkeeper.client.PulsarMockBookKeeper;
@@ -28,42 +36,40 @@ import org.apache.bookkeeper.client.api.LedgerEntries;
 import org.apache.bookkeeper.client.api.LedgerEntry;
 import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.mledger.LedgerOffloader;
+import org.apache.bookkeeper.mledger.impl.LedgerOffloaderStatsImpl;
 import org.apache.bookkeeper.mledger.offload.filesystem.FileStoreTestBase;
-import org.apache.bookkeeper.util.ZkUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.zookeeper.CreateMode;
-import org.apache.zookeeper.MockZooKeeper;
-import org.apache.zookeeper.data.ACL;
+import org.apache.pulsar.common.naming.TopicName;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.net.URI;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
-
 public class FileSystemManagedLedgerOffloaderTest extends FileStoreTestBase {
-    private final PulsarMockBookKeeper bk;
-    private String topic = "public/default/persistent/testOffload";
-    private String storagePath = createStoragePath(topic);
+    private PulsarMockBookKeeper bk;
+    private String managedLedgerName = "public/default/persistent/testOffload";
+    private String topicName = TopicName.fromPersistenceNamingEncoding(managedLedgerName);
+    private String storagePath = createStoragePath(managedLedgerName);
     private LedgerHandle lh;
     private ReadHandle toWrite;
     private final int numberOfEntries = 601;
     private  Map<String, String> map = new HashMap<>();
 
-    public FileSystemManagedLedgerOffloaderTest() throws Exception {
+    @Override
+    public void init() throws Exception {
+        super.init();
         this.bk = new PulsarMockBookKeeper(scheduler);
         this.toWrite = buildReadHandle();
-        map.put("ManagedLedgerName", topic);
+        map.put("ManagedLedgerName", managedLedgerName);
+    }
+
+    @Override
+    public void cleanup() throws IOException {
+        if (bk != null) {
+            bk.shutdown();
+        }
+        super.cleanup();
     }
 
     private ReadHandle buildReadHandle() throws Exception {
@@ -82,6 +88,18 @@ public class FileSystemManagedLedgerOffloaderTest extends FileStoreTestBase {
 
         return bk.newOpenLedgerOp().withLedgerId(lh.getId())
                 .withPassword("foobar".getBytes()).withDigestType(DigestType.CRC32).execute().get();
+    }
+
+    @BeforeMethod(alwaysRun = true)
+    @Override
+    public void start() throws Exception {
+        super.start();
+    }
+
+    @AfterMethod(alwaysRun = true)
+    @Override
+    public void tearDown() {
+        super.tearDown();
     }
 
     @Test
@@ -117,6 +135,31 @@ public class FileSystemManagedLedgerOffloaderTest extends FileStoreTestBase {
             assertEquals(toWriteEntry.getLength(), toTestEntry.getLength());
             assertEquals(toWriteEntry.getEntryBuffer(), toTestEntry.getEntryBuffer());
         }
+    }
+
+    @Test
+    public void testOffloadAndReadMetrics() throws Exception {
+        LedgerOffloader offloader = fileSystemManagedLedgerOffloader;
+        UUID uuid = UUID.randomUUID();
+        offloader.offload(toWrite, uuid, map).get();
+
+        LedgerOffloaderStatsImpl offloaderStats = (LedgerOffloaderStatsImpl) this.offloaderStats;
+        assertTrue(offloaderStats.getOffloadError(topicName) == 0);
+        assertTrue(offloaderStats.getOffloadBytes(topicName) > 0);
+        assertTrue(offloaderStats.getReadLedgerLatency(topicName).count > 0);
+        assertTrue(offloaderStats.getWriteStorageError(topicName) == 0);
+
+        ReadHandle toTest = offloader.readOffloaded(toWrite.getId(), uuid, map).get();
+        LedgerEntries toTestEntries = toTest.read(0, numberOfEntries - 1);
+        Iterator<LedgerEntry> toTestIter = toTestEntries.iterator();
+        while (toTestIter.hasNext()) {
+            LedgerEntry toTestEntry = toTestIter.next();
+        }
+
+        assertTrue(offloaderStats.getReadOffloadError(topicName) == 0);
+        assertTrue(offloaderStats.getReadOffloadBytes(topicName) > 0);
+        assertTrue(offloaderStats.getReadOffloadDataLatency(topicName).count > 0);
+        assertTrue(offloaderStats.getReadOffloadIndexLatency(topicName).count > 0);
     }
 
     @Test

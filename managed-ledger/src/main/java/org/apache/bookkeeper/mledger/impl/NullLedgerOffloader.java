@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,16 +21,15 @@ package org.apache.bookkeeper.mledger.impl;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-
 import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.mledger.LedgerOffloader;
-import org.apache.pulsar.common.policies.data.OffloadPoliciesImpl;
+import org.apache.pulsar.common.policies.data.OffloadPolicies;
 
 /**
  * Null implementation that throws an error on any invokation.
  */
 public class NullLedgerOffloader implements LedgerOffloader {
-    public static NullLedgerOffloader INSTANCE = new NullLedgerOffloader();
+    public static final NullLedgerOffloader INSTANCE = new NullLedgerOffloader();
 
     @Override
     public String getOffloadDriverName() {
@@ -63,12 +62,17 @@ public class NullLedgerOffloader implements LedgerOffloader {
     }
 
     @Override
-    public OffloadPoliciesImpl getOffloadPolicies() {
+    public OffloadPolicies getOffloadPolicies() {
         return null;
     }
 
     @Override
     public void close() {
 
+    }
+
+    @Override
+    public boolean isAppendable() {
+        return false;
     }
 }

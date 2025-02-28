@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,23 +18,21 @@
  */
 package org.apache.bookkeeper.mledger.impl;
 
-import com.google.common.base.Predicate;
+import java.util.Optional;
+import java.util.function.Predicate;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.FindEntryCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntryCallback;
-
-import java.util.Optional;
-import lombok.extern.slf4j.Slf4j;
-
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.Position;
-import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl.PositionBound;
+import org.apache.bookkeeper.mledger.PositionBound;
 
 @Slf4j
 class OpFindNewest implements ReadEntryCallback {
     private final ManagedCursorImpl cursor;
     private final ManagedLedgerImpl ledger;
-    private final PositionImpl startPosition;
+    private final Position startPosition;
     private final FindEntryCallback callback;
     private final Predicate<Entry> condition;
     private final Object ctx;
@@ -43,13 +41,13 @@ class OpFindNewest implements ReadEntryCallback {
         checkFirst, checkLast, searching
     }
 
-    PositionImpl searchPosition;
+    Position searchPosition;
     long min;
     long max;
     Position lastMatchedPosition = null;
     State state;
 
-    public OpFindNewest(ManagedCursorImpl cursor, PositionImpl startPosition, Predicate<Entry> condition,
+    public OpFindNewest(ManagedCursorImpl cursor, Position startPosition, Predicate<Entry> condition,
             long numberOfEntries, FindEntryCallback callback, Object ctx) {
         this.cursor = cursor;
         this.ledger = cursor.ledger;
@@ -65,7 +63,7 @@ class OpFindNewest implements ReadEntryCallback {
         this.state = State.checkFirst;
     }
 
-    public OpFindNewest(ManagedLedgerImpl ledger, PositionImpl startPosition, Predicate<Entry> condition,
+    public OpFindNewest(ManagedLedgerImpl ledger, Position startPosition, Predicate<Entry> condition,
                         long numberOfEntries, FindEntryCallback callback, Object ctx) {
         this.cursor = null;
         this.ledger = ledger;
@@ -86,7 +84,7 @@ class OpFindNewest implements ReadEntryCallback {
         final Position position = entry.getPosition();
         switch (state) {
         case checkFirst:
-            if (!condition.apply(entry)) {
+            if (!condition.test(entry)) {
                 // If no entry is found that matches the condition, it is expected to pass null to the callback.
                 // Otherwise, a message before the expiration date will be deleted due to message TTL.
                 // cf. https://github.com/apache/pulsar/issues/5579
@@ -96,11 +94,14 @@ class OpFindNewest implements ReadEntryCallback {
                 lastMatchedPosition = position;
                 // check last entry
                 state = State.checkLast;
-                PositionImpl lastPosition = ledger.getLastPosition();
                 searchPosition = ledger.getPositionAfterN(searchPosition, max, PositionBound.startExcluded);
+                Position lastPosition = ledger.getLastPosition();
+                searchPosition =
+                        ledger.getPositionAfterN(searchPosition, max, PositionBound.startExcluded);
                 if (lastPosition.compareTo(searchPosition) < 0) {
                     if (log.isDebugEnabled()) {
-                        log.debug("first position {} matches, last should be {}, but moving to lastPos {}", position, searchPosition, lastPosition);
+                        log.debug("first position {} matches, last should be {}, but moving to lastPos {}", position,
+                                searchPosition, lastPosition);
                     }
                     searchPosition = lastPosition;
                 }
@@ -108,7 +109,7 @@ class OpFindNewest implements ReadEntryCallback {
             }
             break;
         case checkLast:
-            if (condition.apply(entry)) {
+            if (condition.test(entry)) {
                 callback.findEntryComplete(position, OpFindNewest.this.ctx);
                 return;
             } else {
@@ -119,7 +120,7 @@ class OpFindNewest implements ReadEntryCallback {
             }
             break;
         case searching:
-            if (condition.apply(entry)) {
+            if (condition.test(entry)) {
                 // mid - last
                 lastMatchedPosition = position;
                 min = mid();

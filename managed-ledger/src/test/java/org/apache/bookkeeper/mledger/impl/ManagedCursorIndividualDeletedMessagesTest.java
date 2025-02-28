@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -23,16 +23,16 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.testng.Assert.assertEquals;
 
-import com.google.common.collect.Lists;
 import com.google.common.collect.Range;
-
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
-
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
+import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo.LedgerInfo;
 import org.apache.bookkeeper.mledger.proto.MLDataFormats.MessageRange;
 import org.apache.bookkeeper.mledger.proto.MLDataFormats.NestedPositionInfo;
@@ -56,18 +56,19 @@ public class ManagedCursorIndividualDeletedMessagesTest {
 
         ManagedLedgerImpl ledger = mock(ManagedLedgerImpl.class);
         doReturn(ledgersInfo).when(ledger).getLedgersInfo();
+        doReturn(config).when(ledger).getConfig();
 
-        ManagedCursorImpl cursor = spy(new ManagedCursorImpl(bookkeeper, config, ledger, "test-cursor"));
-        LongPairRangeSet<PositionImpl> deletedMessages = cursor.getIndividuallyDeletedMessagesSet();
+        ManagedCursorImpl cursor = spy(new ManagedCursorImpl(bookkeeper, ledger, "test-cursor"));
+        LongPairRangeSet<Position> deletedMessages = cursor.getIndividuallyDeletedMessagesSet();
 
         Method recoverMethod = ManagedCursorImpl.class.getDeclaredMethod("recoverIndividualDeletedMessages",
                 List.class);
         recoverMethod.setAccessible(true);
 
         // (1) [(1:5..1:10]]
-        List<MessageRange> messageRangeList = Lists.newArrayList();
+        List<MessageRange> messageRangeList = new ArrayList();
         messageRangeList.add(createMessageRange(1, 5, 1, 10));
-        List<Range<PositionImpl>> expectedRangeList = Lists.newArrayList();
+        List<Range<Position>> expectedRangeList = new ArrayList();
         expectedRangeList.add(createPositionRange(1, 5, 1, 10));
         recoverMethod.invoke(cursor, messageRangeList);
         assertEquals(deletedMessages.size(), 1);
@@ -119,9 +120,9 @@ public class ManagedCursorIndividualDeletedMessagesTest {
         return messageRangeBuilder.build();
     }
 
-    private static Range<PositionImpl> createPositionRange(long lowerLedgerId, long lowerEntryId, long upperLedgerId,
+    private static Range<Position> createPositionRange(long lowerLedgerId, long lowerEntryId, long upperLedgerId,
             long upperEntryId) {
-        return Range.openClosed(new PositionImpl(lowerLedgerId, lowerEntryId),
-                new PositionImpl(upperLedgerId, upperEntryId));
+        return Range.openClosed(PositionFactory.create(lowerLedgerId, lowerEntryId),
+                PositionFactory.create(upperLedgerId, upperEntryId));
     }
 }

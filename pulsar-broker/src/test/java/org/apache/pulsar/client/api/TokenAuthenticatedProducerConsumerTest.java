@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,20 +21,31 @@ package org.apache.pulsar.client.api;
 import static org.mockito.Mockito.spy;
 
 import com.google.common.collect.Sets;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureAlgorithm;
 import java.net.URI;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.time.Duration;
+import java.util.Base64;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import lombok.Cleanup;
 import org.apache.pulsar.broker.authentication.AuthenticationProviderToken;
 import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.impl.auth.AuthenticationToken;
 import org.apache.pulsar.common.policies.data.ClusterData;
-import org.apache.pulsar.common.policies.data.ClusterDataImpl;
 import org.apache.pulsar.common.policies.data.TenantInfoImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
+import org.testng.Assert;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
@@ -47,12 +58,35 @@ import org.testng.annotations.Test;
 public class TokenAuthenticatedProducerConsumerTest extends ProducerConsumerBase {
     private static final Logger log = LoggerFactory.getLogger(TokenAuthenticatedProducerConsumerTest.class);
 
-    // pre-create a public/private_key pair.  Public key used for broker to verify client passed in token
-    private final String TOKEN_PUBLIC_KEY = "data:;base64,MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhHKgdY6arG7eE75bUPtznN5WjMu0sxLq7pI5Aaiw2Ijerbz33iO/Fdd2yJVuAZNDZPD/AVSaeliEh/BP+s2rN8KNuiywD+SlL1NGf2JDS5BvGT4Q8eHfDDRd/iY5zkK58wYwlke6C8fKCx10MTH9iYAJpzaaxs+Tu1RaatK+691aYSiMkYIfgbqAKmSCpK+48al/PkmENfuhzaTBPhCnEblhNvUhS5MjzBcAcGzecpEuVSxUzDtm8rU8DEQR6kkdXS1QnGHVNis/vgk8QzctkJKbtgDIaGzNUmDvTCyPZ8WLWSWJWb1oPxRZwpfXVP69ijU0Rme4/YkuHt6IEw6ANQIDAQAB";
-    // admin token created based on private_key.
-    private final String ADMIN_TOKEN = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZG1pbiIsImV4cCI6MTYyNTEzNjQyMn0.DAfbUPZwQURgGvor4scO0NoqoyHkCulKZkhP7kksCWFvgx6B22iKuXGX42EFlFSRMWYYgIJXV7UZATCLCjJpn_ijrO6AWBmooib3f94OPoLDdkF3qXnqaLnvJtl8_sCoLCSghR_O3hQFgQW2GRjMDdfJgl2_HXCWuzedtI5cQJdbpfU0NU10nzo7RtrpCmUdgQYQEHegYOawLqQVvr53ZGjrZilBXY9HHz1mSlnwZGNGVNNdvRthBuGtXtfKgtfSDF5jLqABvK8TUpdNJybibeiOspdzuY19-wVt4eVXzNAGsP4V4Zs91MgIUYV5lWKnBUuVWalppkMWhRF4Jf-KWQ";
+    private final static String ADMIN_ROLE = "admin";
+    private final String ADMIN_TOKEN;
+    private final String USER_TOKEN;
+    private final String TOKEN_PUBLIC_KEY;
+    private final KeyPair kp;
 
-    @BeforeMethod
+    TokenAuthenticatedProducerConsumerTest() throws NoSuchAlgorithmException {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kp = kpg.generateKeyPair();
+
+        byte[] encodedPublicKey = kp.getPublic().getEncoded();
+        TOKEN_PUBLIC_KEY = "data:;base64," + Base64.getEncoder().encodeToString(encodedPublicKey);
+        ADMIN_TOKEN = generateToken(ADMIN_ROLE);
+        USER_TOKEN = generateToken("user");
+    }
+
+    private String generateToken(String subject) {
+        PrivateKey pkey = kp.getPrivate();
+        long expMillis = System.currentTimeMillis() + Duration.ofHours(1).toMillis();
+        Date exp = new Date(expMillis);
+
+        return Jwts.builder()
+            .setSubject(subject)
+            .setExpiration(exp)
+            .signWith(pkey, SignatureAlgorithm.forSigningKey(pkey))
+            .compact();
+    }
+
+    @BeforeClass
     @Override
     protected void setup() throws Exception {
         conf.setAuthenticationEnabled(true);
@@ -65,6 +99,8 @@ public class TokenAuthenticatedProducerConsumerTest extends ProducerConsumerBase
         Set<String> providers = new HashSet<>();
         providers.add(AuthenticationProviderToken.class.getName());
         conf.setAuthenticationProviders(providers);
+        conf.setBrokerClientAuthenticationPlugin(AuthenticationToken.class.getName());
+        conf.setBrokerClientAuthenticationParameters("token:" + ADMIN_TOKEN);
 
         conf.setClusterName("test");
 
@@ -78,6 +114,7 @@ public class TokenAuthenticatedProducerConsumerTest extends ProducerConsumerBase
 
     // setup both admin and pulsar client
     protected final void clientSetup() throws Exception {
+        closeAdmin();
         admin = spy(PulsarAdmin.builder().serviceHttpUrl(brokerUrl.toString())
                 .authentication(AuthenticationFactory.token(ADMIN_TOKEN))
                 .build());
@@ -87,7 +124,7 @@ public class TokenAuthenticatedProducerConsumerTest extends ProducerConsumerBase
                 .authentication(AuthenticationFactory.token(ADMIN_TOKEN)));
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterClass(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -111,7 +148,7 @@ public class TokenAuthenticatedProducerConsumerTest extends ProducerConsumerBase
         }
 
         Message<byte[]> msg = null;
-        Set<String> messageSet = Sets.newHashSet();
+        Set<String> messageSet = new HashSet<>();
         for (int i = 0; i < 10; i++) {
             msg = consumer.receive(5, TimeUnit.SECONDS);
             String receivedMessage = new String(msg.getData());
@@ -141,4 +178,53 @@ public class TokenAuthenticatedProducerConsumerTest extends ProducerConsumerBase
         log.info("-- Exiting {} test --", methodName);
     }
 
+    @DataProvider
+    public static Object[][] provider() {
+        // The 1st element specifies whether to use TCP service URL
+        // The 2nd element specifies whether to use a token with correct permission
+        return new Object[][] {
+                { true, true },
+                { true, false },
+                { false, true },
+                { false, false },
+        };
+    }
+
+    @Test(dataProvider = "provider")
+    public void testTenantNotExist(boolean useTcpServiceUrl, boolean useCorrectToken) throws Exception {
+        final var operationTimeoutMs = 10000;
+        final var url = useTcpServiceUrl ? pulsar.getBrokerServiceUrl() : pulsar.getWebServiceAddress();
+        final var token = useCorrectToken ? ADMIN_TOKEN : USER_TOKEN;
+        @Cleanup final var client = PulsarClient.builder().serviceUrl(url)
+                .operationTimeout(operationTimeoutMs, TimeUnit.MILLISECONDS)
+                .authentication(AuthenticationFactory.token(token)).build();
+        final var topic = "non-exist/not-exist/tp"; // the namespace does not exist
+        var start = System.currentTimeMillis();
+        try {
+            client.newProducer().topic(topic).create();
+            Assert.fail();
+        } catch (PulsarClientException e) {
+            final var elapsedMs = System.currentTimeMillis() - start;
+            log.info("Failed to create producer after {} ms: {} {}", elapsedMs, e.getClass().getName(), e.getMessage());
+            Assert.assertTrue(elapsedMs < operationTimeoutMs);
+            if (useTcpServiceUrl) {
+                Assert.assertTrue(e instanceof PulsarClientException.TopicDoesNotExistException);
+            } else {
+                Assert.assertTrue(e instanceof PulsarClientException.NotFoundException);
+            }
+        }
+        start = System.currentTimeMillis();
+        try {
+            client.newConsumer().topic(topic).subscriptionName("sub").subscribe();
+        } catch (PulsarClientException e) {
+            final var elapsedMs = System.currentTimeMillis() - start;
+            log.info("Failed to subscribe after {} ms: {} {}", elapsedMs, e.getClass().getName(), e.getMessage());
+            Assert.assertTrue(elapsedMs < operationTimeoutMs);
+            if (useTcpServiceUrl) {
+                Assert.assertTrue(e instanceof PulsarClientException.TopicDoesNotExistException);
+            } else {
+                Assert.assertTrue(e instanceof PulsarClientException.NotFoundException);
+            }
+        }
+    }
 }

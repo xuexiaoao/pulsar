@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,22 +18,23 @@
  */
 package org.apache.pulsar.common.compression;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.pulsar.common.protocol.Commands.serializeMetadataAndPayload;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
-
 import com.scurrilous.circe.checksum.Crc32cIntChecksum;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
-
 import java.io.IOException;
-
+import java.util.Base64;
+import io.netty.util.ReferenceCountUtil;
 import org.apache.pulsar.common.allocator.PulsarByteBufAllocator;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.protocol.ByteBufPair;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.protocol.Commands.ChecksumType;
+import org.testng.Assert;
 import org.testng.annotations.Test;
 
 public class CommandsTest {
@@ -93,5 +94,49 @@ public class CommandsTest {
         return computedChecksum;
     }
 
-
+    @Test
+    public void testPeekStickyKey() {
+        String message = "msg-1";
+        String partitionedKey = "key1";
+        String producerName = "testProducer";
+        int sequenceId = 1;
+        MessageMetadata messageMetadata2 = new MessageMetadata()
+                .setSequenceId(sequenceId)
+                .setProducerName(producerName)
+                .setPartitionKey(partitionedKey)
+                .setPartitionKeyB64Encoded(false)
+                .setPublishTime(System.currentTimeMillis());
+        ByteBuf byteBuf = serializeMetadataAndPayload(Commands.ChecksumType.Crc32c, messageMetadata2,
+                Unpooled.copiedBuffer(message.getBytes(UTF_8)));
+        byte[] bytes = Commands.peekStickyKey(byteBuf, "topic-1", "sub-1");
+        String key = new String(bytes);
+        Assert.assertEquals(partitionedKey, key);
+        ReferenceCountUtil.safeRelease(byteBuf);
+        // test 64 encoded
+        String partitionedKey2 = Base64.getEncoder().encodeToString("key2".getBytes(UTF_8));
+        MessageMetadata messageMetadata = new MessageMetadata()
+                .setSequenceId(sequenceId)
+                .setProducerName(producerName)
+                .setPartitionKey(partitionedKey2)
+                .setPartitionKeyB64Encoded(true)
+                .setPublishTime(System.currentTimeMillis());
+        ByteBuf byteBuf2 = serializeMetadataAndPayload(Commands.ChecksumType.Crc32c, messageMetadata,
+                Unpooled.copiedBuffer(message.getBytes(UTF_8)));
+        byte[] bytes2 = Commands.peekStickyKey(byteBuf2, "topic-2", "sub-2");
+        String key2 = Base64.getEncoder().encodeToString(bytes2);
+        Assert.assertEquals(partitionedKey2, key2);
+        ReferenceCountUtil.safeRelease(byteBuf2);
+        // test fallback key if no key given in message metadata
+        String fallbackPartitionedKey = producerName + "-" + sequenceId;
+        MessageMetadata messageMetadataWithoutKey = new MessageMetadata()
+                .setSequenceId(sequenceId)
+                .setProducerName(producerName)
+                .setPublishTime(System.currentTimeMillis());
+        ByteBuf byteBuf3 = serializeMetadataAndPayload(Commands.ChecksumType.Crc32c, messageMetadataWithoutKey,
+                Unpooled.copiedBuffer(message.getBytes(UTF_8)));
+        byte[] bytes3 = Commands.peekStickyKey(byteBuf3, "topic-3", "sub-3");
+        String key3 = new String(bytes3);
+        Assert.assertEquals(fallbackPartitionedKey, key3);
+        ReferenceCountUtil.safeRelease(byteBuf3);
+    }
 }

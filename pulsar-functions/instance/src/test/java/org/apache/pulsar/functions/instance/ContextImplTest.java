@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,41 +18,6 @@
  */
 package org.apache.pulsar.functions.instance;
 
-import org.apache.pulsar.client.admin.PulsarAdmin;
-import org.apache.pulsar.client.api.Consumer;
-import org.apache.pulsar.client.api.MessageId;
-import org.apache.pulsar.client.api.Producer;
-import org.apache.pulsar.client.api.PulsarClientException;
-import org.apache.pulsar.client.api.Schema;
-import org.apache.pulsar.client.api.SubscriptionType;
-import org.apache.pulsar.client.api.TypedMessageBuilder;
-import org.apache.pulsar.client.impl.ConsumerImpl;
-import org.apache.pulsar.client.impl.MultiTopicsConsumerImpl;
-import org.apache.pulsar.client.impl.ProducerBase;
-import org.apache.pulsar.client.impl.ProducerBuilderImpl;
-import org.apache.pulsar.client.impl.PulsarClientImpl;
-import org.apache.pulsar.client.impl.TypedMessageBuilderImpl;
-import org.apache.pulsar.client.impl.conf.ProducerConfigurationData;
-import org.apache.pulsar.common.naming.TopicName;
-import org.apache.pulsar.functions.api.Record;
-import org.apache.pulsar.functions.instance.state.BKStateStoreImpl;
-import org.apache.pulsar.functions.instance.state.InstanceStateManager;
-import org.apache.pulsar.functions.instance.stats.FunctionCollectorRegistry;
-import org.apache.pulsar.functions.proto.Function.FunctionDetails;
-import org.apache.pulsar.functions.secretsprovider.EnvironmentBasedSecretsProvider;
-import org.apache.pulsar.io.core.SinkContext;
-import org.assertj.core.util.Lists;
-import org.mockito.Mockito;
-import org.slf4j.Logger;
-import org.testng.Assert;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
-
-import java.nio.ByteBuffer;
-import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -66,6 +31,50 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNull;
+import static org.testng.Assert.assertTrue;
+import java.nio.ByteBuffer;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.api.ClientBuilder;
+import org.apache.pulsar.client.api.Consumer;
+import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.api.Producer;
+import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.api.SubscriptionType;
+import org.apache.pulsar.client.api.TypedMessageBuilder;
+import org.apache.pulsar.client.impl.ConnectionPool;
+import org.apache.pulsar.client.impl.ConsumerImpl;
+import org.apache.pulsar.client.impl.MultiTopicsConsumerImpl;
+import org.apache.pulsar.client.impl.ProducerBase;
+import org.apache.pulsar.client.impl.ProducerBuilderImpl;
+import org.apache.pulsar.client.impl.PulsarClientImpl;
+import org.apache.pulsar.client.impl.TypedMessageBuilderImpl;
+import org.apache.pulsar.client.impl.conf.ProducerConfigurationData;
+import org.apache.pulsar.common.io.SinkConfig;
+import org.apache.pulsar.common.io.SourceConfig;
+import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.functions.api.Record;
+import org.apache.pulsar.functions.instance.state.BKStateStoreImpl;
+import org.apache.pulsar.functions.instance.state.InstanceStateManager;
+import org.apache.pulsar.functions.instance.stats.FunctionCollectorRegistry;
+import org.apache.pulsar.functions.proto.Function.FunctionDetails;
+import org.apache.pulsar.functions.secretsprovider.EnvironmentBasedSecretsProvider;
+import org.apache.pulsar.functions.source.PulsarFunctionRecord;
+import org.apache.pulsar.io.core.SinkContext;
+import org.apache.pulsar.io.core.SourceContext;
+import org.assertj.core.util.Lists;
+import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
 
 /**
  * Unit test {@link ContextImpl}.
@@ -74,13 +83,15 @@ public class ContextImplTest {
 
     private InstanceConfig config;
     private Logger logger;
+    private ClientBuilder clientBuilder;
     private PulsarClientImpl client;
     private PulsarAdmin pulsarAdmin;
     private ContextImpl context;
-    private Producer producer = mock(Producer.class);
+    private Producer producer;
+    private ProducerCache producerCache;
 
-    @BeforeMethod
-    public void setup() {
+    @BeforeMethod(alwaysRun = true)
+    public void setup() throws PulsarClientException {
         config = new InstanceConfig();
         config.setExposePulsarAdminClientEnabled(true);
         FunctionDetails functionDetails = FunctionDetails.newBuilder()
@@ -88,25 +99,42 @@ public class ContextImplTest {
             .build();
         config.setFunctionDetails(functionDetails);
         logger = mock(Logger.class);
-        client = mock(PulsarClientImpl.class);
         pulsarAdmin = mock(PulsarAdmin.class);
-        when(client.newProducer()).thenReturn(new ProducerBuilderImpl(client, Schema.BYTES));
+
+        producer = mock(Producer.class);
+        client = mock(PulsarClientImpl.class);
+        ConnectionPool connectionPool = mock(ConnectionPool.class);
+        when(client.getCnxPool()).thenReturn(connectionPool);
+        when(client.newProducer()).thenAnswer(invocation -> new ProducerBuilderImpl(client, Schema.BYTES));
+        when(client.newProducer(any())).thenAnswer(
+                invocation -> new ProducerBuilderImpl(client, invocation.getArgument(0)));
         when(client.createProducerAsync(any(ProducerConfigurationData.class), any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(producer));
         when(client.getSchema(anyString())).thenReturn(CompletableFuture.completedFuture(Optional.empty()));
         when(producer.sendAsync(anyString())).thenReturn(CompletableFuture.completedFuture(null));
 
+        clientBuilder = mock(ClientBuilder.class);
+        when(clientBuilder.build()).thenReturn(client);
+
         TypedMessageBuilder messageBuilder = spy(new TypedMessageBuilderImpl(mock(ProducerBase.class), Schema.STRING));
         doReturn(new CompletableFuture<>()).when(messageBuilder).sendAsync();
         when(producer.newMessage()).thenReturn(messageBuilder);
+        doReturn(CompletableFuture.completedFuture(null)).when(producer).flushAsync();
+        producerCache = new ProducerCache();
         context = new ContextImpl(
             config,
             logger,
             client,
             new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(), new String[0],
                 FunctionDetails.ComponentType.FUNCTION, null, new InstanceStateManager(),
-                pulsarAdmin);
+                pulsarAdmin, clientBuilder, t -> {}, producerCache);
         context.setCurrentMessageContext((Record<String>) () -> null);
+    }
+
+    @AfterMethod(alwaysRun = true)
+    public void tearDown() {
+        producerCache.close();
+        producerCache = null;
     }
 
     @Test(expectedExceptions = IllegalStateException.class)
@@ -135,6 +163,26 @@ public class ContextImplTest {
     }
 
     @Test
+    public void testGetSinkConfig() {
+        SinkContext sinkContext = context;
+        SinkConfig sinkConfig = sinkContext.getSinkConfig();
+        Assert.assertNotNull(sinkConfig);
+    }
+
+    @Test
+    public void testGetSourceConfig() {
+        SourceContext sourceContext = context;
+        SourceConfig sinkConfig = sourceContext.getSourceConfig();
+        Assert.assertNotNull(sinkConfig);
+    }
+
+    @Test
+    public void testGetCurrentRecord() {
+        Record<?> currentRecord = context.getCurrentRecord();
+        assertTrue(currentRecord instanceof PulsarFunctionRecord<?>);
+    }
+
+    @Test
     public void testIncrCounterStateEnabled() throws Exception {
         context.defaultStateStore = mock(BKStateStoreImpl.class);
         context.incrCounterAsync("test-key", 10L);
@@ -149,7 +197,7 @@ public class ContextImplTest {
     }
 
     @Test
-    public void testGetSubscriptionType()  {
+    public void testGetSubscriptionType() {
         SinkContext ctx = context;
         // make sure SinkContext can get SubscriptionType.
         Assert.assertEquals(ctx.getSubscriptionType(), SubscriptionType.Shared);
@@ -190,28 +238,30 @@ public class ContextImplTest {
     }
 
     @Test(expectedExceptions = IllegalStateException.class)
-    public void testGetPulsarAdminWithExposePulsarAdminDisabled() {
+    public void testGetPulsarAdminWithExposePulsarAdminDisabled() throws PulsarClientException {
         config.setExposePulsarAdminClientEnabled(false);
         context = new ContextImpl(
                 config,
                 logger,
                 client,
-                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(), new String[0],
+                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(),
+                new String[0],
                 FunctionDetails.ComponentType.FUNCTION, null, new InstanceStateManager(),
-                pulsarAdmin);
+                pulsarAdmin, clientBuilder, t -> {}, producerCache);
         context.getPulsarAdmin();
     }
 
     @Test
-    public void testUnsupportedExtendedSinkContext(){
+    public void testUnsupportedExtendedSinkContext() throws PulsarClientException {
         config.setExposePulsarAdminClientEnabled(false);
         context = new ContextImpl(
                 config,
                 logger,
                 client,
-                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(), new String[0],
+                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(),
+                new String[0],
                 FunctionDetails.ComponentType.FUNCTION, null, new InstanceStateManager(),
-                pulsarAdmin);
+                pulsarAdmin, clientBuilder, t -> {}, producerCache);
         try {
             context.seek("z", 0, Mockito.mock(MessageId.class));
             Assert.fail("Expected exception");
@@ -239,9 +289,10 @@ public class ContextImplTest {
                 config,
                 logger,
                 client,
-                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(), new String[0],
+                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(),
+                new String[0],
                 FunctionDetails.ComponentType.FUNCTION, null, new InstanceStateManager(),
-                pulsarAdmin);
+                pulsarAdmin, clientBuilder, t -> {}, producerCache);
         Consumer<?> mockConsumer = Mockito.mock(Consumer.class);
         when(mockConsumer.getTopic()).thenReturn(TopicName.get("z").toString());
         context.setInputConsumers(Lists.newArrayList(mockConsumer));
@@ -270,9 +321,10 @@ public class ContextImplTest {
                 config,
                 logger,
                 client,
-                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(), new String[0],
+                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(),
+                new String[0],
                 FunctionDetails.ComponentType.FUNCTION, null, new InstanceStateManager(),
-                pulsarAdmin);
+                pulsarAdmin, clientBuilder, t -> {}, producerCache);
         Consumer<?> mockConsumer = Mockito.mock(Consumer.class);
         when(mockConsumer.getTopic()).thenReturn(TopicName.get("z").toString());
         context.setInputConsumers(Lists.newArrayList(mockConsumer));
@@ -293,9 +345,10 @@ public class ContextImplTest {
                 config,
                 logger,
                 client,
-                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(), new String[0],
+                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(),
+                new String[0],
                 FunctionDetails.ComponentType.FUNCTION, null, new InstanceStateManager(),
-                pulsarAdmin);
+                pulsarAdmin, clientBuilder, t -> {}, producerCache);
         ConsumerImpl<?> consumer1 = Mockito.mock(ConsumerImpl.class);
         when(consumer1.getTopic()).thenReturn(TopicName.get("first").toString());
         ConsumerImpl<?> consumer2 = Mockito.mock(ConsumerImpl.class);
@@ -334,4 +387,87 @@ public class ContextImplTest {
         }
 
     }
- }
+
+    @Test
+    public void testNewOutputRecordBuilder() {
+        Map<String, String> properties = new HashMap<>();
+        properties.put("prop-key", "prop-value");
+        long now = System.currentTimeMillis();
+        context.setCurrentMessageContext(new Record<String>() {
+            @Override
+            public Optional<String> getTopicName() {
+                return Optional.of("input-topic");
+            }
+
+            @Override
+            public Optional<String> getKey() {
+                return Optional.of("input-key");
+            }
+
+            @Override
+            public Schema<String> getSchema() {
+                return Schema.STRING;
+            }
+
+            @Override
+            public String getValue() {
+                return "input-value";
+            }
+
+            @Override
+            public Optional<Long> getEventTime() {
+                return Optional.of(now);
+            }
+
+            @Override
+            public Optional<String> getPartitionId() {
+                return Optional.of("input-partition-id");
+            }
+
+            @Override
+            public Optional<Integer> getPartitionIndex() {
+                return Optional.of(42);
+            }
+
+            @Override
+            public Optional<Long> getRecordSequence() {
+                return Optional.of(43L);
+            }
+
+            @Override
+            public Map<String, String> getProperties() {
+                return properties;
+            }
+        });
+        Record<Integer> record = context.newOutputRecordBuilder(Schema.INT32).build();
+        assertEquals(record.getSchema(), Schema.INT32);
+        assertEquals(record.getTopicName().get(), "input-topic");
+        assertEquals(record.getKey().get(), "input-key");
+        assertEquals(record.getEventTime(), Optional.of(now));
+        assertEquals(record.getPartitionId().get(), "input-partition-id");
+        assertEquals(record.getPartitionIndex(), Optional.of(42));
+        assertEquals(record.getRecordSequence(), Optional.of(43L));
+        assertTrue(record.getProperties().containsKey("prop-key"));
+        assertEquals(record.getProperties().get("prop-key"), "prop-value");
+        assertNull(record.getValue());
+    }
+
+    @Test
+    public void testFatal() {
+        Throwable fatalException = new Exception("test-fatal-exception");
+        AtomicBoolean fatalInvoked = new AtomicBoolean(false);
+        context = new ContextImpl(
+                config,
+                logger,
+                client,
+                new EnvironmentBasedSecretsProvider(), FunctionCollectorRegistry.getDefaultImplementation(),
+                new String[0],
+                FunctionDetails.ComponentType.FUNCTION, null, new InstanceStateManager(),
+                pulsarAdmin, clientBuilder, t -> {
+                    assertEquals(t, fatalException);
+                    fatalInvoked.set(true);
+        }, producerCache);
+        context.fatal(fatalException);
+        assertTrue(fatalInvoked.get());
+    }
+}

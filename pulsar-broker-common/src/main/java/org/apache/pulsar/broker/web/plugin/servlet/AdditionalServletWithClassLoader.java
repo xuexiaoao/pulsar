@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -39,22 +39,46 @@ public class AdditionalServletWithClassLoader implements AdditionalServlet {
 
     @Override
     public void loadConfig(PulsarConfiguration pulsarConfiguration) {
-        servlet.loadConfig(pulsarConfiguration);
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            servlet.loadConfig(pulsarConfiguration);
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public String getBasePath() {
-        return servlet.getBasePath();
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            return servlet.getBasePath();
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public ServletHolder getServletHolder() {
-        return servlet.getServletHolder();
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            return servlet.getServletHolder();
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
     }
 
     @Override
     public void close() {
-        servlet.close();
+        ClassLoader prevClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(classLoader);
+            servlet.close();
+        } finally {
+            Thread.currentThread().setContextClassLoader(prevClassLoader);
+        }
         try {
             classLoader.close();
         } catch (IOException e) {

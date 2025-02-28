@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,6 +19,7 @@
 package org.apache.pulsar.metadata.coordination.impl;
 
 import com.fasterxml.jackson.databind.type.TypeFactory;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,9 +27,10 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.metadata.api.MetadataCache;
 import org.apache.pulsar.metadata.api.MetadataSerde;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
@@ -49,6 +51,8 @@ class LockManagerImpl<T> implements LockManager<T> {
     private final MetadataStoreExtended store;
     private final MetadataCache<T> cache;
     private final MetadataSerde<T> serde;
+    private final FutureUtil.Sequencer<Void> sequencer;
+    private final ScheduledExecutorService executor;
 
     private enum State {
         Ready, Closed
@@ -56,10 +60,18 @@ class LockManagerImpl<T> implements LockManager<T> {
 
     private State state = State.Ready;
 
-    LockManagerImpl(MetadataStoreExtended store, Class<T> clazz) {
+    LockManagerImpl(MetadataStoreExtended store, Class<T> clazz, ScheduledExecutorService executor) {
+        this(store, new JSONMetadataSerdeSimpleType<>(
+                TypeFactory.defaultInstance().constructSimpleType(clazz, null)),
+                executor);
+    }
+
+    LockManagerImpl(MetadataStoreExtended store, MetadataSerde<T> serde, ScheduledExecutorService executor) {
         this.store = store;
-        this.cache = store.getMetadataCache(clazz);
-        this.serde = new JSONMetadataSerdeSimpleType<>(TypeFactory.defaultInstance().constructSimpleType(clazz, null));
+        this.cache = store.getMetadataCache(serde);
+        this.serde = serde;
+        this.executor = executor;
+        this.sequencer = FutureUtil.Sequencer.create();
         store.registerSessionListener(this::handleSessionEvent);
         store.registerListener(this::handleDataNotification);
     }
@@ -71,10 +83,10 @@ class LockManagerImpl<T> implements LockManager<T> {
 
     @Override
     public CompletableFuture<ResourceLock<T>> acquireLock(String path, T value) {
-        ResourceLockImpl<T> lock = new ResourceLockImpl<>(store, serde, path, value);
+        ResourceLockImpl<T> lock = new ResourceLockImpl<>(store, serde, path, executor);
 
         CompletableFuture<ResourceLock<T>> result = new CompletableFuture<>();
-        lock.acquire().thenRun(() -> {
+        lock.acquire(value).thenRun(() -> {
             synchronized (LockManagerImpl.this) {
                 if (state == State.Ready) {
                     locks.put(path, lock);
@@ -104,10 +116,28 @@ class LockManagerImpl<T> implements LockManager<T> {
     }
 
     private void handleSessionEvent(SessionEvent se) {
-        if (se == SessionEvent.SessionReestablished) {
-            log.info("Metadata store session has been re-established. Revalidating all the existing locks.");
-            locks.values().forEach(ResourceLockImpl::revalidate);
-        }
+        // We want to make sure we're processing one event at a time and that we're done with one event before going
+        // for the next one.
+        sequencer.sequential(() -> FutureUtil.composeAsync(() -> {
+            final List<CompletableFuture<Void>> futures = new ArrayList<>();
+            if (se == SessionEvent.SessionReestablished) {
+                log.info("Metadata store session has been re-established. Revalidating all the existing locks.");
+                for (ResourceLockImpl<T> lock : locks.values()) {
+                    futures.add(lock.silentRevalidateOnce());
+                }
+
+            } else if (se == SessionEvent.Reconnected) {
+                log.info("Metadata store connection has been re-established. Revalidating locks that were pending.");
+                for (ResourceLockImpl<T> lock : locks.values()) {
+                    futures.add(lock.revalidateIfNeededAfterReconnection());
+                }
+            }
+            return FutureUtil.waitForAll(futures)
+                    .exceptionally(ex -> {
+                        log.warn("Failure when processing session event", ex);
+                        return null;
+                    });
+        }, executor));
     }
 
     private void handleDataNotification(Notification n) {
@@ -145,10 +175,8 @@ class LockManagerImpl<T> implements LockManager<T> {
             this.state = State.Closed;
         }
 
-        return FutureUtils.collect(
-                locks.values().stream()
-                        .map(ResourceLock::release)
-                        .collect(Collectors.toList()))
-                .thenApply(x -> null);
+        return FutureUtil.waitForAll(locks.values().stream()
+                .map(ResourceLock::release)
+                .collect(Collectors.toList()));
     }
 }

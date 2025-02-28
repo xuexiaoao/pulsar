@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -20,10 +20,8 @@ package org.apache.pulsar.client.admin.internal;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import javax.ws.rs.client.Entity;
 import javax.ws.rs.client.InvocationCallback;
 import javax.ws.rs.client.WebTarget;
@@ -32,6 +30,7 @@ import org.apache.pulsar.client.admin.Brokers;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.common.conf.InternalConfigurationData;
+import org.apache.pulsar.common.naming.TopicVersion;
 import org.apache.pulsar.common.policies.data.BrokerInfo;
 import org.apache.pulsar.common.policies.data.NamespaceOwnershipStatus;
 import org.apache.pulsar.common.util.Codec;
@@ -39,125 +38,59 @@ import org.apache.pulsar.common.util.Codec;
 public class BrokersImpl extends BaseResource implements Brokers {
     private final WebTarget adminBrokers;
 
-    public BrokersImpl(WebTarget web, Authentication auth, long readTimeoutMs) {
-        super(auth, readTimeoutMs);
+    public BrokersImpl(WebTarget web, Authentication auth, long requestTimeoutMs) {
+        super(auth, requestTimeoutMs);
         adminBrokers = web.path("admin/v2/brokers");
     }
 
     @Override
+    public List<String> getActiveBrokers() throws PulsarAdminException {
+        return sync(() -> getActiveBrokersAsync(null));
+    }
+
+    @Override
+    public CompletableFuture<List<String>> getActiveBrokersAsync() {
+        return getActiveBrokersAsync(null);
+    }
+
+    @Override
     public List<String> getActiveBrokers(String cluster) throws PulsarAdminException {
-        try {
-            return getActiveBrokersAsync(cluster).get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        return sync(() -> getActiveBrokersAsync(cluster));
     }
 
     @Override
     public CompletableFuture<List<String>> getActiveBrokersAsync(String cluster) {
-        WebTarget path = adminBrokers.path(cluster);
-        final CompletableFuture<List<String>> future = new CompletableFuture<>();
-        asyncGetRequest(path,
-                new InvocationCallback<List<String>>() {
-                    @Override
-                    public void completed(List<String> brokers) {
-                        future.complete(brokers);
-                    }
-
-                    @Override
-                    public void failed(Throwable throwable) {
-                        future.completeExceptionally(getApiException(throwable.getCause()));
-                    }
-                });
-        return future;
+        WebTarget path = cluster == null ? adminBrokers : adminBrokers.path(cluster);
+        return asyncGetRequest(path, new FutureCallback<List<String>>(){});
     }
 
     @Override
     public BrokerInfo getLeaderBroker() throws PulsarAdminException {
-        try {
-            return getLeaderBrokerAsync().get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        return sync(() -> getLeaderBrokerAsync());
     }
 
     @Override
     public CompletableFuture<BrokerInfo> getLeaderBrokerAsync() {
         WebTarget path = adminBrokers.path("leaderBroker");
-        final CompletableFuture<BrokerInfo> future = new CompletableFuture<>();
-        asyncGetRequest(path,
-                new InvocationCallback<BrokerInfo>() {
-                    @Override
-                    public void completed(BrokerInfo leaderBroker) {
-                        future.complete(leaderBroker);
-                    }
-
-                    @Override
-                    public void failed(Throwable throwable) {
-                        future.completeExceptionally(getApiException(throwable.getCause()));
-                    }
-                });
-        return future;
+        return asyncGetRequest(path, new FutureCallback<BrokerInfo>(){});
     }
 
     @Override
-    public Map<String, NamespaceOwnershipStatus> getOwnedNamespaces(String cluster, String brokerUrl)
+    public Map<String, NamespaceOwnershipStatus> getOwnedNamespaces(String cluster, String brokerId)
             throws PulsarAdminException {
-        try {
-            return getOwnedNamespacesAsync(cluster, brokerUrl).get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        return sync(() -> getOwnedNamespacesAsync(cluster, brokerId));
     }
 
     @Override
     public CompletableFuture<Map<String, NamespaceOwnershipStatus>> getOwnedNamespacesAsync(
-            String cluster, String brokerUrl) {
-        WebTarget path = adminBrokers.path(cluster).path(brokerUrl).path("ownedNamespaces");
-        final CompletableFuture<Map<String, NamespaceOwnershipStatus>> future = new CompletableFuture<>();
-        asyncGetRequest(path,
-                new InvocationCallback<Map<String, NamespaceOwnershipStatus>>() {
-                    @Override
-                    public void completed(Map<String, NamespaceOwnershipStatus> ownedNamespaces) {
-                        future.complete(ownedNamespaces);
-                    }
-
-                    @Override
-                    public void failed(Throwable throwable) {
-                        future.completeExceptionally(getApiException(throwable.getCause()));
-                    }
-                });
-        return future;
+            String cluster, String brokerId) {
+        WebTarget path = adminBrokers.path(cluster).path(brokerId).path("ownedNamespaces");
+        return asyncGetRequest(path, new FutureCallback<Map<String, NamespaceOwnershipStatus>>(){});
     }
 
     @Override
     public void updateDynamicConfiguration(String configName, String configValue) throws PulsarAdminException {
-        try {
-            updateDynamicConfigurationAsync(configName, configValue).
-                    get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        sync(() -> updateDynamicConfigurationAsync(configName, configValue));
     }
 
     @Override
@@ -169,16 +102,7 @@ public class BrokersImpl extends BaseResource implements Brokers {
 
     @Override
     public void deleteDynamicConfiguration(String configName) throws PulsarAdminException {
-        try {
-            deleteDynamicConfigurationAsync(configName).get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        sync(() -> deleteDynamicConfigurationAsync(configName));
     }
 
     @Override
@@ -189,185 +113,91 @@ public class BrokersImpl extends BaseResource implements Brokers {
 
     @Override
     public Map<String, String> getAllDynamicConfigurations() throws PulsarAdminException {
-        try {
-            return getAllDynamicConfigurationsAsync().get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        return sync(this::getAllDynamicConfigurationsAsync);
     }
 
     @Override
     public CompletableFuture<Map<String, String>> getAllDynamicConfigurationsAsync() {
         WebTarget path = adminBrokers.path("configuration").path("values");
-        final CompletableFuture<Map<String, String>> future = new CompletableFuture<>();
-        asyncGetRequest(path,
-                new InvocationCallback<Map<String, String>>() {
-                    @Override
-                    public void completed(Map<String, String> allConfs) {
-                        future.complete(allConfs);
-                    }
-
-                    @Override
-                    public void failed(Throwable throwable) {
-                        future.completeExceptionally(getApiException(throwable.getCause()));
-                    }
-                });
-        return future;
+        return asyncGetRequest(path, new FutureCallback<Map<String, String>>(){});
     }
 
     @Override
     public List<String> getDynamicConfigurationNames() throws PulsarAdminException {
-        try {
-            return getDynamicConfigurationNamesAsync().get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        return sync(this::getDynamicConfigurationNamesAsync);
     }
 
     @Override
     public CompletableFuture<List<String>> getDynamicConfigurationNamesAsync() {
         WebTarget path = adminBrokers.path("configuration");
-        final CompletableFuture<List<String>> future = new CompletableFuture<>();
-        asyncGetRequest(path,
-                new InvocationCallback<List<String>>() {
-                    @Override
-                    public void completed(List<String> confNames) {
-                        future.complete(confNames);
-                    }
-
-                    @Override
-                    public void failed(Throwable throwable) {
-                        future.completeExceptionally(getApiException(throwable.getCause()));
-                    }
-                });
-        return future;
+        return asyncGetRequest(path, new FutureCallback<List<String>>(){});
     }
 
     @Override
     public Map<String, String> getRuntimeConfigurations() throws PulsarAdminException {
-        try {
-            return getRuntimeConfigurationsAsync().get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        return sync(this::getRuntimeConfigurationsAsync);
     }
 
     @Override
     public CompletableFuture<Map<String, String>> getRuntimeConfigurationsAsync() {
         WebTarget path = adminBrokers.path("configuration").path("runtime");
-        final CompletableFuture<Map<String, String>> future = new CompletableFuture<>();
-        asyncGetRequest(path,
-                new InvocationCallback<Map<String, String>>() {
-                    @Override
-                    public void completed(Map<String, String> runtimeConfs) {
-                        future.complete(runtimeConfs);
-                    }
-
-                    @Override
-                    public void failed(Throwable throwable) {
-                        future.completeExceptionally(getApiException(throwable.getCause()));
-                    }
-                });
-        return future;
+        return asyncGetRequest(path, new FutureCallback<Map<String, String>>(){});
     }
 
     @Override
     public InternalConfigurationData getInternalConfigurationData() throws PulsarAdminException {
-        try {
-            return getInternalConfigurationDataAsync().get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        return sync(this::getInternalConfigurationDataAsync);
     }
 
     @Override
     public CompletableFuture<InternalConfigurationData> getInternalConfigurationDataAsync() {
         WebTarget path = adminBrokers.path("internal-configuration");
-        final CompletableFuture<InternalConfigurationData> future = new CompletableFuture<>();
-        asyncGetRequest(path,
-                new InvocationCallback<InternalConfigurationData>() {
-                    @Override
-                    public void completed(InternalConfigurationData internalConfigurationData) {
-                        future.complete(internalConfigurationData);
-                    }
-
-                    @Override
-                    public void failed(Throwable throwable) {
-                        future.completeExceptionally(getApiException(throwable.getCause()));
-                    }
-                });
-        return future;
+        return asyncGetRequest(path, new FutureCallback<InternalConfigurationData>(){});
     }
 
     @Override
     public void backlogQuotaCheck() throws PulsarAdminException {
-        try {
-            backlogQuotaCheckAsync().get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        sync(this::backlogQuotaCheckAsync);
     }
 
     @Override
     public CompletableFuture<Void> backlogQuotaCheckAsync() {
-        WebTarget path = adminBrokers.path("backlogQuotaCheck");
-        final CompletableFuture<Void> future = new CompletableFuture<>();
-        asyncGetRequest(path, new InvocationCallback<Void>() {
-            @Override
-            public void completed(Void unused) {
-                future.complete(null);
-            }
-
-            @Override
-            public void failed(Throwable throwable) {
-                future.completeExceptionally(throwable);
-            }
-        });
-        return future;
+        WebTarget path = adminBrokers.path("backlog-quota-check");
+        return asyncGetRequest(path, new FutureCallback<Void>() {});
     }
 
     @Override
+    @Deprecated
     public void healthcheck() throws PulsarAdminException {
-        try {
-            healthcheckAsync().get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+        healthcheck(TopicVersion.V1, Optional.empty());
     }
 
     @Override
+    @Deprecated
     public CompletableFuture<Void> healthcheckAsync() {
+        return healthcheckAsync(TopicVersion.V1, Optional.empty());
+    }
+
+
+    @Override
+    public void healthcheck(TopicVersion topicVersion) throws PulsarAdminException {
+        sync(() -> healthcheckAsync(topicVersion, Optional.empty()));
+    }
+
+    @Override
+    public void healthcheck(TopicVersion topicVersion, Optional<String> brokerId) throws PulsarAdminException {
+        sync(() -> healthcheckAsync(topicVersion, brokerId));
+    }
+
+    @Override
+    public CompletableFuture<Void> healthcheckAsync(TopicVersion topicVersion, Optional<String> brokerId) {
         WebTarget path = adminBrokers.path("health");
+        if (topicVersion != null) {
+            path = path.queryParam("topicVersion", topicVersion);
+        }
+        if (brokerId.isPresent()) {
+            path = path.queryParam("brokerId", brokerId.get());
+        }
         final CompletableFuture<Void> future = new CompletableFuture<>();
         asyncGetRequest(path,
                 new InvocationCallback<String>() {
@@ -390,29 +220,22 @@ public class BrokersImpl extends BaseResource implements Brokers {
     }
 
     @Override
-    public String getVersion() throws PulsarAdminException {
-        WebTarget path = adminBrokers.path("version");
-        try {
-            final CompletableFuture<String> future = new CompletableFuture<>();
-            asyncGetRequest(path, new InvocationCallback<String>() {
-                @Override
-                public void completed(String version) {
-                    future.complete(version);
-                }
+    public CompletableFuture<Void> shutDownBrokerGracefully(int maxConcurrentUnloadPerSec,
+                                                            boolean forcedTerminateTopic) {
+        WebTarget path = adminBrokers.path("shutdown")
+                .queryParam("maxConcurrentUnloadPerSec", maxConcurrentUnloadPerSec)
+                .queryParam("forcedTerminateTopic", forcedTerminateTopic);
+        return asyncPostRequest(path, Entity.entity("", MediaType.APPLICATION_JSON));
+    }
 
-                @Override
-                public void failed(Throwable throwable) {
-                    future.completeExceptionally(getApiException(throwable.getCause()));
-                }
-            });
-            return future.get(this.readTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw (PulsarAdminException) e.getCause();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PulsarAdminException(e);
-        } catch (TimeoutException e) {
-            throw new PulsarAdminException.TimeoutException(e);
-        }
+    @Override
+    public String getVersion() throws PulsarAdminException {
+        return sync(this::getVersionAsync);
+    }
+
+    public CompletableFuture<String> getVersionAsync() {
+        WebTarget path = adminBrokers.path("version");
+
+        return asyncGetRequest(path, new FutureCallback<String>(){});
     }
 }

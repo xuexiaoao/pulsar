@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -20,14 +20,15 @@ package org.apache.pulsar.metadata.api;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.annotations.Beta;
-
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
-
 import org.apache.pulsar.metadata.api.MetadataStoreException.BadVersionException;
 import org.apache.pulsar.metadata.api.MetadataStoreException.NotFoundException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Metadata store client interface.
@@ -37,6 +38,8 @@ import org.apache.pulsar.metadata.api.MetadataStoreException.NotFoundException;
  */
 @Beta
 public interface MetadataStore extends AutoCloseable {
+
+    Logger LOGGER = LoggerFactory.getLogger(MetadataStore.class);
 
     /**
      * Read the value of one key, identified by the path
@@ -51,6 +54,17 @@ public interface MetadataStore extends AutoCloseable {
      * @return a future to track the async request
      */
     CompletableFuture<Optional<GetResult>> get(String path);
+
+
+    /**
+     * Ensure that the next value read from  the local client will be up-to-date with the latest version of the value
+     * as it can be seen by all the other clients.
+     * @param path
+     * @return a handle to the operation
+     */
+    default CompletableFuture<Void> sync(String path) {
+        return CompletableFuture.completedFuture(null);
+    }
 
     /**
      * Return all the nodes (lexicographically sorted) that are children to the specific path.
@@ -112,6 +126,35 @@ public interface MetadataStore extends AutoCloseable {
      */
     CompletableFuture<Void> delete(String path, Optional<Long> expectedVersion);
 
+    default CompletableFuture<Void> deleteIfExists(String path, Optional<Long> expectedVersion) {
+        return delete(path, expectedVersion)
+                .exceptionally(e -> {
+                    if (e.getCause() instanceof NotFoundException) {
+                        LOGGER.info("Path {} not found while deleting (this is not a problem)", path);
+                        return null;
+                    } else {
+                        if (expectedVersion.isEmpty()) {
+                            LOGGER.info("Failed to delete path {}", path, e);
+                        } else {
+                            LOGGER.info("Failed to delete path {} with expected version {}", path, expectedVersion, e);
+                        }
+                        throw new CompletionException(e);
+                    }
+                });
+    }
+
+    /**
+     * Delete a key-value pair and all the children nodes.
+     *
+     * Note: the operation might not be carried in an atomic fashion. If the operation fails, the deletion of the
+     *       tree might be only partial.
+     *
+     * @param path
+     *            the path of the key to delete from the store
+     * @return a future to track the async request
+     */
+    CompletableFuture<Void> deleteRecursive(String path);
+
     /**
      * Register a listener that will be called on changes in the underlying store.
      *
@@ -126,9 +169,35 @@ public interface MetadataStore extends AutoCloseable {
      * @param <T>
      * @param clazz
      *            the class type to be used for serialization/deserialization
+     * @param cacheConfig
+     *          the cache configuration to be used
      * @return the metadata cache object
      */
-    <T> MetadataCache<T> getMetadataCache(Class<T> clazz);
+    <T> MetadataCache<T> getMetadataCache(Class<T> clazz, MetadataCacheConfig cacheConfig);
+
+    /**
+     * Create a metadata cache specialized for a specific class.
+     *
+     * @param <T>
+     * @param clazz
+     *            the class type to be used for serialization/deserialization
+     * @return the metadata cache object
+     */
+    default <T> MetadataCache<T> getMetadataCache(Class<T> clazz) {
+        return getMetadataCache(clazz, getDefaultMetadataCacheConfig());
+    }
+
+    /**
+     * Create a metadata cache specialized for a specific class.
+     *
+     * @param <T>
+     * @param typeRef
+     *            the type ref description to be used for serialization/deserialization
+     * @param cacheConfig
+     *          the cache configuration to be used
+     * @return the metadata cache object
+     */
+    <T> MetadataCache<T> getMetadataCache(TypeReference<T> typeRef, MetadataCacheConfig cacheConfig);
 
     /**
      * Create a metadata cache specialized for a specific class.
@@ -138,7 +207,21 @@ public interface MetadataStore extends AutoCloseable {
      *            the type ref description to be used for serialization/deserialization
      * @return the metadata cache object
      */
-    <T> MetadataCache<T> getMetadataCache(TypeReference<T> typeRef);
+    default <T> MetadataCache<T> getMetadataCache(TypeReference<T> typeRef) {
+        return getMetadataCache(typeRef, getDefaultMetadataCacheConfig());
+    }
+
+    /**
+     * Create a metadata cache that uses a particular serde object.
+     *
+     * @param <T>
+     * @param serde
+     *            the custom serialization/deserialization object
+     * @param cacheConfig
+     *          the cache configuration to be used
+     * @return the metadata cache object
+     */
+    <T> MetadataCache<T> getMetadataCache(MetadataSerde<T> serde, MetadataCacheConfig cacheConfig);
 
     /**
      * Create a metadata cache that uses a particular serde object.
@@ -148,5 +231,16 @@ public interface MetadataStore extends AutoCloseable {
      *            the custom serialization/deserialization object
      * @return the metadata cache object
      */
-    <T> MetadataCache<T> getMetadataCache(MetadataSerde<T> serde);
+    default <T> MetadataCache<T> getMetadataCache(MetadataSerde<T> serde) {
+        return getMetadataCache(serde, getDefaultMetadataCacheConfig());
+    }
+
+    /**
+     * Returns the default metadata cache config.
+     *
+     * @return default metadata cache config
+     */
+    default MetadataCacheConfig getDefaultMetadataCacheConfig() {
+        return MetadataCacheConfig.builder().build();
+    }
 }
